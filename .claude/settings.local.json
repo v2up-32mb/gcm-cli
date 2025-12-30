@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(go build:*)",
+      "Bash(ls:*)",
+      "WebSearch",
+      "Bash(go get:*)",
+      "Bash(GOSUMDB=off go doc:*)"
+    ]
+  },
+  "outputStyle": "Explanatory"
+}
