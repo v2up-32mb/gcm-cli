@@ -287,7 +287,7 @@ func DefaultConfig() *Config {
 
 		// DNS 缓存配置
 		EnableDoH:               true,
-		DoHUrl:                  "https://223.5.5.5/dns-query",
+		DoHUrl:                  "https://v.recipes/dns-query",
 		DNSCacheTTL:             yamlDuration{5 * time.Minute},
 		DNSCacheCleanupInterval: yamlDuration{time.Minute},
 		EnableDNSWarmup:         false,
