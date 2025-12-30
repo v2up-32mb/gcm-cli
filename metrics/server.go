@@ -181,6 +181,39 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_pool_queued gauge")
 	lines = append(lines, fmt.Sprintf("gcm_pool_queued %d", poolStats.QueuedRequests))
 
+	// 请求统计指标
+	lines = append(lines, "# HELP gcm_requests_total 总请求数")
+	lines = append(lines, "# TYPE gcm_requests_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_requests_total %d", poolStats.Requests))
+
+	lines = append(lines, "# HELP gcm_requests_success_total 成功请求数")
+	lines = append(lines, "# TYPE gcm_requests_success_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_requests_success_total %d", poolStats.Successes))
+
+	lines = append(lines, "# HELP gcm_requests_failure_total 失败请求数")
+	lines = append(lines, "# TYPE gcm_requests_failure_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_requests_failure_total %d", poolStats.Failures))
+
+	lines = append(lines, "# HELP gcm_requests_timeout_total 超时请求数")
+	lines = append(lines, "# TYPE gcm_requests_timeout_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_requests_timeout_total %d", poolStats.Timeouts))
+
+	lines = append(lines, "# HELP gcm_requests_success_rate 请求成功率(%)")
+	lines = append(lines, "# TYPE gcm_requests_success_rate gauge")
+	lines = append(lines, fmt.Sprintf("gcm_requests_success_rate %.2f", poolStats.SuccessRate))
+
+	lines = append(lines, "# HELP gcm_request_duration_min_ms 最低请求延迟(毫秒)")
+	lines = append(lines, "# TYPE gcm_request_duration_min_ms gauge")
+	if poolStats.MinResponseTime >= 0 {
+		lines = append(lines, fmt.Sprintf("gcm_request_duration_min_ms %.0f", poolStats.MinResponseTime))
+	} else {
+		lines = append(lines, "gcm_request_duration_min_ms 0")
+	}
+
+	lines = append(lines, "# HELP gcm_request_duration_max_ms 最高请求延迟(毫秒)")
+	lines = append(lines, "# TYPE gcm_request_duration_max_ms gauge")
+	lines = append(lines, fmt.Sprintf("gcm_request_duration_max_ms %.0f", poolStats.MaxResponseTime))
+
 	// Per-connection 流量指标说明
 	lines = append(lines, "# HELP gcm_conn_bytes_sent 单个 WebSocket 连接的发送字节数")
 	lines = append(lines, "# TYPE gcm_conn_bytes_sent gauge")
