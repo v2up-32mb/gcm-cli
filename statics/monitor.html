@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GCM Metrics Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .stat-value {
+            text-shadow: 0 0 20px currentColor;
+        }
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .chart-container {
+            position: relative;
+            height: 200px;
+        }
+    </style>
+</head>
+<body class="text-white p-4 md:p-8">
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <div class="flex flex-col md:flex-row justify-between items-center mb-8">
+            <div>
+                <h1 class="text-3xl md:text-4xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+                    GCM Metrics Dashboard
+                </h1>
+                <p class="text-gray-400 mt-2">实时监控面板</p>
+            </div>
+            <div class="flex items-center gap-4 mt-4 md:mt-0">
+                <div class="flex items-center gap-2">
+                    <span class="w-3 h-3 bg-green-500 rounded-full pulse"></span>
+                    <span class="text-gray-300">运行时间: <span id="uptime" class="text-green-400 font-mono">--</span></span>
+                </div>
+                <button onclick="fetchMetrics()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">
+                    🔄 刷新
+                </button>
+            </div>
+        </div>
+
+        <!-- Connection Pool Stats -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">空闲连接</div>
+                <div id="pool_idle" class="text-3xl font-bold text-blue-400 stat-value">--</div>
+            </div>
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">活跃连接</div>
+                <div id="pool_active" class="text-3xl font-bold text-green-400 stat-value">--</div>
+            </div>
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">建立中</div>
+                <div id="pool_pending" class="text-3xl font-bold text-yellow-400 stat-value">--</div>
+            </div>
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">等待队列</div>
+                <div id="pool_queued" class="text-3xl font-bold text-orange-400 stat-value">--</div>
+            </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <!-- Connection Pool Chart -->
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">📊 连接池状态</h3>
+                <div class="chart-container">
+                    <canvas id="poolChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Request Stats Chart -->
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">📈 请求统计</h3>
+                <div class="chart-container">
+                    <canvas id="requestChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Request Performance -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">⚡ 请求性能</h3>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">成功率</span>
+                        <span id="success_rate" class="text-2xl font-bold text-green-400">--%</span>
+                    </div>
+                    <div class="w-full bg-gray-700 rounded-full h-2">
+                        <div id="success_rate_bar" class="bg-green-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 text-center text-sm">
+                        <div>
+                            <div class="text-gray-400">最小</div>
+                            <div id="duration_min" class="text-yellow-400 font-mono">--ms</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-400">平均</div>
+                            <div id="duration_avg" class="text-blue-400 font-mono">--ms</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-400">最大</div>
+                            <div id="duration_max" class="text-red-400 font-mono">--ms</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Relay Latency -->
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">🌐 中转节点延迟</h3>
+                <div class="chart-container">
+                    <canvas id="latencyChart"></canvas>
+                </div>
+            </div>
+
+            <!-- DNS Cache -->
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">🔍 DNS 缓存</h3>
+                <div class="space-y-3">
+                    <div class="flex justify-between">
+                        <span class="text-gray-400">缓存条目数</span>
+                        <span id="dns_cache_size" class="text-blue-400 font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-400">命中次数</span>
+                        <span id="dns_hits" class="text-green-400 font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-400">未命中次数</span>
+                        <span id="dns_misses" class="text-red-400 font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-400">命中率</span>
+                        <span id="dns_hit_rate" class="text-purple-400 font-mono">--%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Traffic Stats -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">📤 流量与速率</h3>
+                <div class="grid grid-cols-2 gap-4 relative">
+                    <div class="text-center border-r border-gray-700 pr-2">
+                        <div class="text-gray-400 text-sm mb-1">总发送</div>
+                        <div id="bytes_sent" class="text-2xl font-bold text-cyan-400 mb-4">--</div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div class="bg-gray-800/50 p-2 rounded">
+                                <div class="text-xs text-gray-500">平均速率</div>
+                                <div id="rate_send_avg" class="text-sm text-cyan-300 font-mono">--</div>
+                            </div>
+                            <div class="bg-gray-800/50 p-2 rounded">
+                                <div class="text-xs text-gray-500">最大速率</div>
+                                <div id="rate_send_max" class="text-sm text-cyan-300 font-mono">--</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-center pl-2">
+                        <div class="text-gray-400 text-sm mb-1">总接收</div>
+                        <div id="bytes_received" class="text-2xl font-bold text-pink-400 mb-4">--</div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div class="bg-gray-800/50 p-2 rounded">
+                                <div class="text-xs text-gray-500">平均速率</div>
+                                <div id="rate_recv_avg" class="text-sm text-pink-300 font-mono">--</div>
+                            </div>
+                            <div class="bg-gray-800/50 p-2 rounded">
+                                <div class="text-xs text-gray-500">最大速率</div>
+                                <div id="rate_recv_max" class="text-sm text-pink-300 font-mono">--</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card rounded-xl p-6">
+                <h3 class="text-lg font-semibold mb-4 text-gray-200">🔗 连接统计</h3>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="text-center p-3 bg-gray-800/50 rounded-lg">
+                        <div class="text-gray-400 text-sm">创建连接</div>
+                        <div id="pool_created" class="text-xl font-bold text-green-400">--</div>
+                    </div>
+                    <div class="text-center p-3 bg-gray-800/50 rounded-lg">
+                        <div class="text-gray-400 text-sm">关闭连接</div>
+                        <div id="pool_closed" class="text-xl font-bold text-red-400">--</div>
+                    </div>
+                    <div class="text-center p-3 bg-gray-800/50 rounded-lg">
+                        <div class="text-gray-400 text-sm">中转节点</div>
+                        <div id="relay_nodes" class="text-xl font-bold text-blue-400">--</div>
+                    </div>
+                    <div class="text-center p-3 bg-gray-800/50 rounded-lg">
+                        <div class="text-gray-400 text-sm">移除节点</div>
+                        <div id="relay_removed" class="text-xl font-bold text-yellow-400">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- WebSocket Connections Table -->
+        <div class="card rounded-xl p-6 mb-6">
+            <h3 class="text-lg font-semibold mb-4 text-gray-200">🔌 WebSocket 连接详情</h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="text-gray-400 border-b border-gray-700">
+                            <th class="text-left py-3 px-4">连接ID</th>
+                            <th class="text-left py-3 px-4">中转节点</th>
+                            <th class="text-right py-3 px-4">RTT延迟(ms)</th>
+                            <th class="text-right py-3 px-4">发送</th>
+                            <th class="text-right py-3 px-4">接收</th>
+                            <th class="text-right py-3 px-4">Stream数</th>
+                        </tr>
+                    </thead>
+                    <tbody id="wsTable" class="divide-y divide-gray-700/50">
+                        <tr><td colspan="5" class="text-center py-8 text-gray-500">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="text-center text-gray-500 text-sm">
+            自动刷新间隔: 5秒 | 最后更新: <span id="lastUpdate">--</span>
+        </div>
+    </div>
+
+    <script>
+        let poolChart, requestChart, latencyChart;
+
+        // Initialize Charts
+        function initCharts() {
+            const chartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: { color: '#9ca3af' }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(255,255,255,0.1)' },
+                        ticks: { color: '#9ca3af' }
+                    },
+                    x: {
+                        grid: { color: 'rgba(255,255,255,0.1)' },
+                        ticks: { color: '#9ca3af' }
+                    }
+                }
+            };
+
+            // Pool Chart
+            poolChart = new Chart(document.getElementById('poolChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: ['空闲', '活跃', '建立中', '等待'],
+                    datasets: [{
+                        data: [0, 0, 0, 0],
+                        backgroundColor: ['#60a5fa', '#34d399', '#fbbf24', '#f97316'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: { color: '#9ca3af', padding: 15 }
+                        }
+                    }
+                }
+            });
+
+            // Request Chart
+            requestChart = new Chart(document.getElementById('requestChart'), {
+                type: 'bar',
+                data: {
+                    labels: ['总请求', '成功', '失败', '超时'],
+                    datasets: [{
+                        label: '请求数',
+                        data: [0, 0, 0, 0],
+                        backgroundColor: ['#8b5cf6', '#34d399', '#f87171', '#fbbf24'],
+                        borderRadius: 8
+                    }]
+                },
+                options: chartOptions
+            });
+
+            // Latency Chart
+            latencyChart = new Chart(document.getElementById('latencyChart'), {
+                type: 'bar',
+                data: {
+                    labels: ['最低', '平均', '最高'],
+                    datasets: [{
+                        label: '延迟 (ms)',
+                        data: [0, 0, 0],
+                        backgroundColor: ['#34d399', '#60a5fa', '#f87171'],
+                        borderRadius: 8
+                    }]
+                },
+                options: chartOptions
+            });
+        }
+
+        // Parse Prometheus metrics
+        function parseMetrics(text) {
+            const metrics = {};
+            const lines = text.split('\n');
+            
+            for (const line of lines) {
+                if (line.startsWith('#') || line.trim() === '') continue;
+                
+                // Handle metrics with labels
+                const labelMatch = line.match(/^(\w+)\{([^}]+)\}\s+(.+)$/);
+                if (labelMatch) {
+                    const [, name, labels, value] = labelMatch;
+                    if (!metrics[name]) metrics[name] = [];
+                    const labelObj = {};
+                    labels.split(',').forEach(l => {
+                        const [k, v] = l.split('=');
+                        labelObj[k] = v.replace(/"/g, '');
+                    });
+                    metrics[name].push({ labels: labelObj, value: parseFloat(value) });
+                } else {
+                    // Simple metrics
+                    const simpleMatch = line.match(/^(\w+)\s+(.+)$/);
+                    if (simpleMatch) {
+                        const [, name, value] = simpleMatch;
+                        metrics[name] = parseFloat(value);
+                    }
+                }
+            }
+            return metrics;
+        }
+
+        // Format bytes
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Format uptime
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        // Update UI with metrics
+        function updateUI(metrics) {
+            // Basic stats
+            document.getElementById('uptime').textContent = formatUptime(metrics.gcm_uptime_seconds || 0);
+            document.getElementById('pool_idle').textContent = metrics.gcm_pool_idle ?? '--';
+            document.getElementById('pool_active').textContent = metrics.gcm_pool_active ?? '--';
+            document.getElementById('pool_pending').textContent = metrics.gcm_pool_pending ?? '--';
+            document.getElementById('pool_queued').textContent = metrics.gcm_pool_queued ?? '--';
+
+            // Pool chart
+            poolChart.data.datasets[0].data = [
+                metrics.gcm_pool_idle || 0,
+                metrics.gcm_pool_active || 0,
+                metrics.gcm_pool_pending || 0,
+                metrics.gcm_pool_queued || 0
+            ];
+            poolChart.update();
+
+            // Request stats
+            requestChart.data.datasets[0].data = [
+                metrics.gcm_requests_total || 0,
+                metrics.gcm_requests_successes_total || 0,
+                metrics.gcm_requests_failures_total || 0,
+                metrics.gcm_requests_timeouts_total || 0
+            ];
+            requestChart.update();
+
+            // Success rate
+            const successRate = metrics.gcm_request_success_rate ?? 0;
+            document.getElementById('success_rate').textContent = successRate.toFixed(1) + '%';
+            document.getElementById('success_rate_bar').style.width = successRate + '%';
+
+            // Duration
+            document.getElementById('duration_min').textContent = (metrics.gcm_request_duration_min ?? 0).toFixed(0) + 'ms';
+            document.getElementById('duration_avg').textContent = (metrics.gcm_request_duration_avg ?? 0).toFixed(0) + 'ms';
+            document.getElementById('duration_max').textContent = (metrics.gcm_request_duration_max ?? 0).toFixed(0) + 'ms';
+
+            // Latency chart
+            latencyChart.data.datasets[0].data = [
+                metrics.gcm_relay_latency_best || 0,
+                metrics.gcm_relay_latency_avg || 0,
+                metrics.gcm_relay_latency_worst || 0
+            ];
+            latencyChart.update();
+
+            // DNS
+            document.getElementById('dns_cache_size').textContent = metrics.gcm_dns_cache_size ?? '--';
+            document.getElementById('dns_hits').textContent = metrics.gcm_dns_cache_hits_total ?? '--';
+            document.getElementById('dns_misses').textContent = metrics.gcm_dns_cache_misses_total ?? '--';
+            document.getElementById('dns_hit_rate').textContent = (metrics.gcm_dns_cache_hit_rate ?? 0).toFixed(1) + '%';
+
+            // Traffic & Rates
+            document.getElementById('bytes_sent').textContent = formatBytes(metrics.gcm_bytes_sent_total || 0);
+            document.getElementById('bytes_received').textContent = formatBytes(metrics.gcm_bytes_received_total || 0);
+            
+            document.getElementById('rate_send_avg').textContent = formatBytes(metrics.gcm_rate_send_avg || 0) + '/s';
+            document.getElementById('rate_send_max').textContent = formatBytes(metrics.gcm_rate_send_max || 0) + '/s';
+            document.getElementById('rate_recv_avg').textContent = formatBytes(metrics.gcm_rate_recv_avg || 0) + '/s';
+            document.getElementById('rate_recv_max').textContent = formatBytes(metrics.gcm_rate_recv_max || 0) + '/s';
+
+            // Connection stats
+            document.getElementById('pool_created').textContent = metrics.gcm_pool_created_total ?? '--';
+            document.getElementById('pool_closed').textContent = metrics.gcm_pool_closed_total ?? '--';
+            document.getElementById('relay_nodes').textContent = metrics.gcm_relay_nodes_total ?? '--';
+            document.getElementById('relay_removed').textContent = metrics.gcm_relay_removed_nodes ?? '--';
+
+            // WebSocket table
+            const wsData = {};
+            ['gcm_conn_bytes_sent', 'gcm_conn_bytes_received', 'gcm_conn_stream_count', 'gcm_conn_rtt'].forEach(metric => {
+                if (Array.isArray(metrics[metric])) {
+                    metrics[metric].forEach(item => {
+                        const id = item.labels.ws_id;
+                        if (!wsData[id]) wsData[id] = { relay: item.labels.relay };
+                        if (metric === 'gcm_conn_bytes_sent') wsData[id].sent = item.value;
+                        if (metric === 'gcm_conn_bytes_received') wsData[id].received = item.value;
+                        if (metric === 'gcm_conn_stream_count') wsData[id].streams = item.value;
+                        if (metric === 'gcm_conn_rtt') wsData[id].rtt = item.value;
+                    });
+                }
+            });
+
+            const tbody = document.getElementById('wsTable');
+            if (Object.keys(wsData).length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-gray-500">暂无连接</td></tr>';
+            } else {
+                tbody.innerHTML = Object.entries(wsData).map(([id, data]) => `
+                    <tr class="hover:bg-gray-800/30 transition-colors">
+                        <td class="py-3 px-4 font-mono text-blue-400">${id}</td>
+                        <td class="py-3 px-4 font-mono text-gray-300">${data.relay || '--'}</td>
+                        <td class="py-3 px-4 text-right text-gray-400">${data.rtt !== undefined ? data.rtt.toFixed(0) : '--'}</td>
+                        <td class="py-3 px-4 text-right text-cyan-400">${formatBytes(data.sent || 0)}</td>
+                        <td class="py-3 px-4 text-right text-pink-400">${formatBytes(data.received || 0)}</td>
+                        <td class="py-3 px-4 text-right text-purple-400">${data.streams ?? 0}</td>
+                    </tr>
+                `).join('');
+            }
+
+            // Last update
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+        }
+
+        // Fetch metrics
+        async function fetchMetrics() {
+            try {
+                const response = await fetch('/metrics');
+                const text = await response.text();
+                const metrics = parseMetrics(text);
+                updateUI(metrics);
+            } catch (error) {
+                console.error('Failed to fetch metrics:', error);
+            }
+        }
+
+        // Initialize
+        initCharts();
+        fetchMetrics();
+        setInterval(fetchMetrics, 5000);
+    </script>
+</body>
+</html>
