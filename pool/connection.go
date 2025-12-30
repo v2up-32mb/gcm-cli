@@ -1129,6 +1129,7 @@ func (p *ConnectionPool) maintainPool() {
 	}
 
 	if needExpansion {
+		p.log.Info("触发按需扩容: %s", reason)
 		p.createConnection(fmt.Sprintf("按需扩容(%s)", reason))
 	}
 }
@@ -1404,6 +1405,7 @@ func (p *ConnectionPool) adjustPoolSize() {
 
 		// 扩容时创建新连接
 		if newSize > total {
+			p.log.Info("触发动态扩容: %d -> %d (%s)", total, newSize, reason)
 			needed := newSize - total
 			for i := 0; i < min(needed, 5); i++ {
 				go p.createConnection("动态扩容")
