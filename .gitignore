@@ -13,3 +13,4 @@
 *.log
 gcm-go
 gcm
+.claude/*
