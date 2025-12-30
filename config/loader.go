@@ -1,14 +1,13 @@
 package config
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/urfave/cli/v3"
+	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,27 +19,27 @@ func LoadConfig() (*Config, error) {
 	for _, arg := range os.Args {
 		if arg == "-h" || arg == "--help" {
 			// 显示帮助并退出程序
-			cmd := &cli.Command{
+			app := &cli.App{
 				Name:  "gcm",
 				Usage: "GCM - Cloudflare Worker Proxy 客户端",
 				Flags: DefineFlags(),
 			}
-			_ = cmd.Run(context.Background(), os.Args)
+			_ = app.Run(os.Args)
 			os.Exit(0)
 		}
 	}
 
-	cmd := &cli.Command{
+	app := &cli.App{
 		Name:  "gcm",
 		Usage: "GCM - Cloudflare Worker Proxy 客户端",
 		Flags: DefineFlags(),
-		Action: func(ctx context.Context, cmd *cli.Command) error {
+		Action: func(ctx *cli.Context) error {
 			// 1. 从默认配置开始
 			cfg := DefaultConfig()
 
 			// 2. 如果指定了配置文件，先加载
-			if cmd.IsSet("config") {
-				configPath := cmd.String("config")
+			if ctx.IsSet("config") {
+				configPath := ctx.String("config")
 				fileCfg, err := LoadFile(configPath)
 				if err != nil {
 					return fmt.Errorf("加载配置文件失败: %w", err)
@@ -50,7 +49,7 @@ func LoadConfig() (*Config, error) {
 			}
 
 			// 3. 应用命令行参数覆盖
-			if err := ApplyFlags(cfg, ctx, cmd); err != nil {
+			if err := ApplyFlags(cfg, ctx); err != nil {
 				return err
 			}
 
@@ -66,7 +65,7 @@ func LoadConfig() (*Config, error) {
 	}
 
 	// 运行 cli 命令
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
+	if err := app.Run(os.Args); err != nil {
 		return nil, err
 	}
 

@@ -1,11 +1,10 @@
 package config
 
 import (
-	"context"
 	"strings"
 	"time"
 
-	"github.com/urfave/cli/v3"
+	"github.com/urfave/cli/v2"
 )
 
 // DefineFlags 定义所有命令行参数
@@ -13,61 +12,52 @@ func DefineFlags() []cli.Flag {
 	return []cli.Flag{
 		// ===== 配置文件 =====
 		&cli.StringFlag{
-			Name:     "config",
-			Aliases:  []string{"c"},
-			Usage:    "配置文件路径 (YAML/JSON)",
-			OnlyOnce: true,
+			Name:    "config",
+			Aliases: []string{"c"},
+			Usage:   "配置文件路径 (YAML/JSON)",
 		},
 
 		// ===== 基本配置 =====
 		&cli.StringFlag{
-			Name:     "worker",
-			Aliases:  []string{"w"},
-			Usage:    "Worker 地址 (必须指定)",
-			OnlyOnce: true,
+			Name:    "worker",
+			Aliases: []string{"w"},
+			Usage:   "Worker 地址 (必须指定)",
 		},
 		&cli.StringFlag{
-			Name:     "listen",
-			Aliases:  []string{"l"},
-			Usage:    "SOCKS5 监听地址 (如 :10080 或 0.0.0.0:10080)",
-			Value:    ":10080",
-			OnlyOnce: true,
+			Name:    "listen",
+			Aliases: []string{"l"},
+			Usage:   "SOCKS5 监听地址 (如 :10080 或 0.0.0.0:10080)",
+			Value:   ":10080",
 		},
 		&cli.StringFlag{
-			Name:     "token",
-			Aliases:  []string{"t"},
-			Usage:    "代理访问令牌",
-			OnlyOnce: true,
+			Name:    "token",
+			Aliases: []string{"t"},
+			Usage:   "代理访问令牌",
 		},
 		&cli.StringFlag{
-			Name:     "log-level",
-			Usage:    "日志级别: DEBUG/INFO/WARN/ERROR",
-			Value:    "INFO",
-			OnlyOnce: true,
+			Name:    "log-level",
+			Usage:   "日志级别: DEBUG/INFO/WARN/ERROR",
+			Value:   "INFO",
 		},
 
 		// ===== DNS 配置 =====
 		&cli.StringFlag{
-			Name:     "doh",
-			Aliases:  []string{"d"},
-			Usage:    "DoH 服务地址",
-			Value:    "https://223.5.5.5/dns-query",
-			OnlyOnce: true,
+			Name:    "doh",
+			Aliases: []string{"d"},
+			Usage:   "DoH 服务地址",
+			Value:   "https://223.5.5.5/dns-query",
 		},
 		&cli.BoolFlag{
-			Name:     "no-doh",
-			Usage:    "禁用 DoH",
-			OnlyOnce: true,
+			Name:  "no-doh",
+			Usage: "禁用 DoH",
 		},
 		&cli.BoolFlag{
-			Name:     "dns-warmup",
-			Usage:    "启用 DNS 预热",
-			OnlyOnce: true,
+			Name:  "dns-warmup",
+			Usage: "启用 DNS 预热",
 		},
 		&cli.BoolFlag{
-			Name:     "doh-proxy",
-			Usage:    "启用 DoH 通过代理访问",
-			OnlyOnce: true,
+			Name:  "doh-proxy",
+			Usage: "启用 DoH 通过代理访问",
 		},
 
 		// ===== 中转节点配置 =====
@@ -77,214 +67,197 @@ func DefineFlags() []cli.Flag {
 			Usage:   "中转节点列表（可多次指定或逗号分隔）",
 		},
 		&cli.IntFlag{
-			Name:     "min-pool",
-			Usage:    "最小连接池大小",
-			Value:    3,
-			OnlyOnce: true,
+			Name:  "min-pool",
+			Usage: "最小连接池大小",
+			Value: 3,
 		},
 		&cli.IntFlag{
-			Name:     "max-pool",
-			Usage:    "最大连接池大小",
-			Value:    15,
-			OnlyOnce: true,
+			Name:  "max-pool",
+			Usage: "最大连接池大小",
+			Value: 15,
 		},
 
 		// ===== Metrics 配置 =====
 		&cli.BoolFlag{
-			Name:     "metrics",
-			Usage:    "启用 Metrics 端点",
-			OnlyOnce: true,
+			Name:  "metrics",
+			Usage: "启用 Metrics 端点",
 		},
 		&cli.IntFlag{
-			Name:     "metrics-port",
-			Usage:    "Metrics 端口",
-			Value:    9090,
-			OnlyOnce: true,
+			Name:  "metrics-port",
+			Usage: "Metrics 端口",
+			Value: 9090,
 		},
 
 		// ===== 连接池配置 =====
 		&cli.BoolFlag{
-			Name:     "no-warmup",
-			Usage:    "禁用连接池预热",
-			OnlyOnce: true,
+			Name:  "no-warmup",
+			Usage: "禁用连接池预热",
 		},
 		&cli.BoolFlag{
-			Name:     "no-reconnect",
-			Usage:    "禁用断线自动重连",
-			OnlyOnce: true,
+			Name:  "no-reconnect",
+			Usage: "禁用断线自动重连",
 		},
 		&cli.BoolFlag{
-			Name:     "no-dynamic-pool",
-			Usage:    "禁用动态池大小调整",
-			OnlyOnce: true,
+			Name:  "no-dynamic-pool",
+			Usage: "禁用动态池大小调整",
 		},
 
 		// ===== 日志配置 =====
 		&cli.StringFlag{
-			Name:     "log-file",
-			Usage:    "启用日志文件输出到指定路径",
-			OnlyOnce: true,
+			Name:  "log-file",
+			Usage: "启用日志文件输出到指定路径",
 		},
 
 		// ===== 隧道配置 =====
 		&cli.IntFlag{
-			Name:     "timeout",
-			Usage:    "隧道超时时间（秒）",
-			Value:    60,
-			OnlyOnce: true,
+			Name:  "timeout",
+			Usage: "隧道超时时间（秒）",
+			Value: 60,
 		},
 		&cli.BoolFlag{
-			Name:     "no-mux",
-			Usage:    "禁用多路复用",
-			OnlyOnce: true,
+			Name:  "no-mux",
+			Usage: "禁用多路复用",
 		},
 
 		// ===== 高级时间配置 =====
 		&cli.DurationFlag{
-			Name:     "connection-ttl",
-			Usage:    "连接最大存活时间",
-			Value:    5 * time.Minute,
-			OnlyOnce: true,
+			Name:  "connection-ttl",
+			Usage: "连接最大存活时间",
+			Value: 5 * time.Minute,
 		},
 		&cli.DurationFlag{
-			Name:     "connection-timeout",
-			Usage:    "连接超时时间",
-			Value:    time.Second,
-			OnlyOnce: true,
+			Name:  "connection-timeout",
+			Usage: "连接超时时间",
+			Value: time.Second,
 		},
 		&cli.DurationFlag{
-			Name:     "heartbeat-interval",
-			Usage:    "心跳间隔",
-			Value:    15 * time.Second,
-			OnlyOnce: true,
+			Name:  "heartbeat-interval",
+			Usage: "心跳间隔",
+			Value: 15 * time.Second,
 		},
 		&cli.DurationFlag{
-			Name:     "heartbeat-timeout",
-			Usage:    "心跳响应超时",
-			Value:    3 * time.Second,
-			OnlyOnce: true,
+			Name:  "heartbeat-timeout",
+			Usage: "心跳响应超时",
+			Value: 3 * time.Second,
 		},
 		&cli.DurationFlag{
-			Name:     "dns-cache-ttl",
-			Usage:    "DNS 缓存过期时间",
-			Value:    5 * time.Minute,
-			OnlyOnce: true,
+			Name:  "dns-cache-ttl",
+			Usage: "DNS 缓存过期时间",
+			Value: 5 * time.Minute,
 		},
 		&cli.DurationFlag{
-			Name:     "relay-monitor-interval",
-			Usage:    "节点监控间隔",
-			Value:    30 * time.Second,
-			OnlyOnce: true,
+			Name:  "relay-monitor-interval",
+			Usage: "节点监控间隔",
+			Value: 30 * time.Second,
 		},
 		&cli.DurationFlag{
-			Name:     "relay-max-latency",
-			Usage:    "节点最大可接受延迟",
-			Value:    500 * time.Millisecond,
-			OnlyOnce: true,
+			Name:  "relay-max-latency",
+			Usage: "节点最大可接受延迟",
+			Value: 500 * time.Millisecond,
 		},
 	}
 }
 
 // ApplyFlags 将命令行参数应用到 Config
-// urfave/cli v3 使用 context.Context 而不是 *cli.Context
-func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
-	// 从 cmd 获取参数值
+// urfave/cli v2 使用 *cli.Context
+func ApplyFlags(cfg *Config, ctx *cli.Context) error {
+	// 从 ctx 获取参数值
 	// ===== 基本配置 =====
-	if cmd.IsSet("worker") {
-		cfg.WorkerHost = cmd.String("worker")
+	if ctx.IsSet("worker") {
+		cfg.WorkerHost = ctx.String("worker")
 	}
-	if cmd.IsSet("listen") {
-		cfg.ListenAddress = cmd.String("listen")
+	if ctx.IsSet("listen") {
+		cfg.ListenAddress = ctx.String("listen")
 	}
-	if cmd.IsSet("token") {
-		cfg.ProxyToken = cmd.String("token")
+	if ctx.IsSet("token") {
+		cfg.ProxyToken = ctx.String("token")
 	}
-	if cmd.IsSet("log-level") {
-		cfg.LogLevel = ParseLogLevel(cmd.String("log-level"))
+	if ctx.IsSet("log-level") {
+		cfg.LogLevel = ParseLogLevel(ctx.String("log-level"))
 	}
 
 	// ===== DNS 配置 =====
-	if cmd.IsSet("doh") {
-		cfg.DoHUrl = cmd.String("doh")
+	if ctx.IsSet("doh") {
+		cfg.DoHUrl = ctx.String("doh")
 	}
-	if cmd.IsSet("no-doh") && cmd.Bool("no-doh") {
+	if ctx.IsSet("no-doh") && ctx.Bool("no-doh") {
 		cfg.EnableDoH = false
 	}
-	if cmd.IsSet("dns-warmup") && cmd.Bool("dns-warmup") {
+	if ctx.IsSet("dns-warmup") && ctx.Bool("dns-warmup") {
 		cfg.EnableDNSWarmup = true
 	}
-	if cmd.IsSet("doh-proxy") && cmd.Bool("doh-proxy") {
+	if ctx.IsSet("doh-proxy") && ctx.Bool("doh-proxy") {
 		cfg.EnableDoHProxy = true
 	}
 
 	// ===== 中转节点配置 =====
-	if cmd.IsSet("relay") {
-		relayList := cmd.StringSlice("relay")
+	if ctx.IsSet("relay") {
+		relayList := ctx.StringSlice("relay")
 		if len(relayList) > 0 {
 			cfg.RelayIPs = flattenStringSlice(relayList)
 		}
 	}
-	if cmd.IsSet("min-pool") {
-		cfg.MinPoolSize = cmd.Int("min-pool")
+	if ctx.IsSet("min-pool") {
+		cfg.MinPoolSize = ctx.Int("min-pool")
 	}
-	if cmd.IsSet("max-pool") {
-		cfg.MaxPoolSize = cmd.Int("max-pool")
+	if ctx.IsSet("max-pool") {
+		cfg.MaxPoolSize = ctx.Int("max-pool")
 	}
 
 	// ===== Metrics 配置 =====
-	if cmd.IsSet("metrics") && cmd.Bool("metrics") {
+	if ctx.IsSet("metrics") && ctx.Bool("metrics") {
 		cfg.EnableMetrics = true
 	}
-	if cmd.IsSet("metrics-port") {
-		cfg.MetricsPort = cmd.Int("metrics-port")
+	if ctx.IsSet("metrics-port") {
+		cfg.MetricsPort = ctx.Int("metrics-port")
 	}
 
 	// ===== 连接池配置 =====
-	if cmd.IsSet("no-warmup") && cmd.Bool("no-warmup") {
+	if ctx.IsSet("no-warmup") && ctx.Bool("no-warmup") {
 		cfg.EnablePoolWarmup = false
 	}
-	if cmd.IsSet("no-reconnect") && cmd.Bool("no-reconnect") {
+	if ctx.IsSet("no-reconnect") && ctx.Bool("no-reconnect") {
 		cfg.EnableAutoReconnect = false
 	}
-	if cmd.IsSet("no-dynamic-pool") && cmd.Bool("no-dynamic-pool") {
+	if ctx.IsSet("no-dynamic-pool") && ctx.Bool("no-dynamic-pool") {
 		cfg.EnableDynamicPool = false
 	}
 
 	// ===== 日志配置 =====
-	if cmd.IsSet("log-file") {
+	if ctx.IsSet("log-file") {
 		cfg.EnableLogFile = true
-		cfg.LogFilePath = cmd.String("log-file")
+		cfg.LogFilePath = ctx.String("log-file")
 	}
 
 	// ===== 隧道配置 =====
-	if cmd.IsSet("timeout") {
-		cfg.TunnelTimeout = yamlDuration{time.Duration(cmd.Int("timeout")) * time.Second}
+	if ctx.IsSet("timeout") {
+		cfg.TunnelTimeout = yamlDuration{time.Duration(ctx.Int("timeout")) * time.Second}
 	}
-	if cmd.IsSet("no-mux") && cmd.Bool("no-mux") {
+	if ctx.IsSet("no-mux") && ctx.Bool("no-mux") {
 		cfg.EnableMultiplex = false
 	}
 
 	// ===== 高级时间配置 =====
-	if cmd.IsSet("connection-ttl") {
-		cfg.ConnectionTTL = yamlDuration{cmd.Duration("connection-ttl")}
+	if ctx.IsSet("connection-ttl") {
+		cfg.ConnectionTTL = yamlDuration{ctx.Duration("connection-ttl")}
 	}
-	if cmd.IsSet("connection-timeout") {
-		cfg.ConnectionTimeout = yamlDuration{cmd.Duration("connection-timeout")}
+	if ctx.IsSet("connection-timeout") {
+		cfg.ConnectionTimeout = yamlDuration{ctx.Duration("connection-timeout")}
 	}
-	if cmd.IsSet("heartbeat-interval") {
-		cfg.HeartbeatInterval = yamlDuration{cmd.Duration("heartbeat-interval")}
+	if ctx.IsSet("heartbeat-interval") {
+		cfg.HeartbeatInterval = yamlDuration{ctx.Duration("heartbeat-interval")}
 	}
-	if cmd.IsSet("heartbeat-timeout") {
-		cfg.HeartbeatTimeout = yamlDuration{cmd.Duration("heartbeat-timeout")}
+	if ctx.IsSet("heartbeat-timeout") {
+		cfg.HeartbeatTimeout = yamlDuration{ctx.Duration("heartbeat-timeout")}
 	}
-	if cmd.IsSet("dns-cache-ttl") {
-		cfg.DNSCacheTTL = yamlDuration{cmd.Duration("dns-cache-ttl")}
+	if ctx.IsSet("dns-cache-ttl") {
+		cfg.DNSCacheTTL = yamlDuration{ctx.Duration("dns-cache-ttl")}
 	}
-	if cmd.IsSet("relay-monitor-interval") {
-		cfg.RelayMonitorInterval = yamlDuration{cmd.Duration("relay-monitor-interval")}
+	if ctx.IsSet("relay-monitor-interval") {
+		cfg.RelayMonitorInterval = yamlDuration{ctx.Duration("relay-monitor-interval")}
 	}
-	if cmd.IsSet("relay-max-latency") {
-		cfg.RelayMaxLatency = yamlDuration{cmd.Duration("relay-max-latency")}
+	if ctx.IsSet("relay-max-latency") {
+		cfg.RelayMaxLatency = yamlDuration{ctx.Duration("relay-max-latency")}
 	}
 
 	return nil
