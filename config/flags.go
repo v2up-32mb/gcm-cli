@@ -51,7 +51,7 @@ func DefineFlags() []cli.Flag {
 			Name:     "doh",
 			Aliases:  []string{"d"},
 			Usage:    "DoH 服务地址",
-			Value:    "https://223.5.5.5/dns-query",
+			Value:    "https://v.recipes/dns-query",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
