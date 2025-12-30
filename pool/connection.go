@@ -1568,6 +1568,15 @@ type ConnectionData struct {
 	Sent         int64
 	Recv         int64
 	StreamCount  int // 使用 StreamManager.GetStreamCount() 作为权威来源
+	RateSnapshot RateSnapshot // 速率快照数据
+}
+
+// RateSnapshot 速率快照数据
+type RateSnapshot struct {
+	AvgSent float64 // 平均发送速率 (字节/秒)
+	MaxSent float64 // 最大发送速率 (字节/秒)
+	AvgRecv float64 // 平均接收速率 (字节/秒)
+	MaxRecv float64 // 最大接收速率 (字节/秒)
 }
 
 // GetConnectionsData 获取所有连接的数据（用于 metrics 暴露）
@@ -1579,6 +1588,7 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 	// 从空闲池获取连接
 	for _, conn := range p.pool {
 		sent, recv, _ := conn.Traffic.GetSnapshot()
+		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
 		result = append(result, ConnectionData{
 			ConnectionID: conn.ConnectionID,
 			RelayAddr:    conn.RelayAddr,
@@ -1586,12 +1596,19 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 			Sent:         sent,
 			Recv:         recv,
 			StreamCount:  0, // 空闲连接没有 stream
+			RateSnapshot: RateSnapshot{
+				AvgSent: avgSent,
+				MaxSent: maxSent,
+				AvgRecv: avgRecv,
+				MaxRecv: maxRecv,
+			},
 		})
 	}
 
 	// 从 managerByConn 获取连接及其 stream 计数
 	for conn, mgr := range p.managerByConn {
 		sent, recv, _ := conn.Traffic.GetSnapshot()
+		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
 		result = append(result, ConnectionData{
 			ConnectionID: conn.ConnectionID,
 			RelayAddr:    conn.RelayAddr,
@@ -1599,6 +1616,12 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 			Sent:         sent,
 			Recv:         recv,
 			StreamCount:  mgr.GetStreamCount(), // 使用 StreamManager.GetStreamCount() 作为权威来源
+			RateSnapshot: RateSnapshot{
+				AvgSent: avgSent,
+				MaxSent: maxSent,
+				AvgRecv: avgRecv,
+				MaxRecv: maxRecv,
+			},
 		})
 	}
 	p.mu.RUnlock()

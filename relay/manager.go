@@ -58,6 +58,7 @@ type RelayManager struct {
 	mu                   sync.RWMutex
 	rawRelays            []string
 	optimalRelays        []*RelayNode
+	allNodes             []*RelayNode // 所有已配置的节点（包括高延迟的）
 	isInitialized        bool
 	totalTestCount       int
 	totalRemovedCount    int
@@ -143,17 +144,24 @@ func (rm *RelayManager) Init() error {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	rm.optimalRelays = make([]*RelayNode, 0)
+	// 保存所有已测速的节点
+	rm.allNodes = make([]*RelayNode, 0, len(results))
 	for _, r := range results {
+		r.LastCheck = time.Now()
+		r.Score = rm.calculateScore(r.Latency, r.FailCount)
+		rm.allNodes = append(rm.allNodes, r)
+	}
+
+	// 仅保留低于延迟阈值的节点作为最优节点
+	rm.optimalRelays = make([]*RelayNode, 0)
+	for _, r := range rm.allNodes {
 		if r.Latency < rm.cfg.GetRelayMaxLatency() {
 			r.FailCount = 0
-			r.LastCheck = time.Now()
-			r.Score = rm.calculateScore(r.Latency, r.FailCount)
 			rm.optimalRelays = append(rm.optimalRelays, r)
 		}
 	}
 
-	filteredCount := len(results) - len(rm.optimalRelays)
+	filteredCount := len(rm.allNodes) - len(rm.optimalRelays)
 	elapsed := time.Since(startTime)
 
 	if len(rm.optimalRelays) > 0 {
@@ -200,13 +208,13 @@ func (rm *RelayManager) rescoreLoop() {
 // rescoreAll 全面重新评分
 func (rm *RelayManager) rescoreAll() {
 	rm.mu.RLock()
-	if len(rm.optimalRelays) == 0 {
+	if len(rm.allNodes) == 0 {
 		rm.mu.RUnlock()
 		rm.log.Debug("无可用节点，跳过重新评分")
 		return
 	}
-	relays := make([]*RelayNode, len(rm.optimalRelays))
-	copy(relays, rm.optimalRelays)
+	relays := make([]*RelayNode, len(rm.allNodes))
+	copy(relays, rm.allNodes)
 	rm.mu.RUnlock()
 
 	startTime := time.Now()
@@ -218,13 +226,20 @@ func (rm *RelayManager) rescoreAll() {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
+	// 更新所有节点的状态
+	rm.allNodes = make([]*RelayNode, 0, len(results))
+	for _, r := range results {
+		r.LastCheck = time.Now()
+		r.Score = rm.calculateScore(r.Latency, r.FailCount)
+		rm.allNodes = append(rm.allNodes, r)
+	}
+
+	// 仅保留低于延迟阈值的节点作为最优节点
 	beforeCount := len(rm.optimalRelays)
 	rm.optimalRelays = make([]*RelayNode, 0)
-	for _, r := range results {
+	for _, r := range rm.allNodes {
 		if r.Latency < rm.cfg.GetRelayMaxLatency() {
 			r.FailCount = 0
-			r.LastCheck = time.Now()
-			r.Score = rm.calculateScore(r.Latency, r.FailCount)
 			rm.optimalRelays = append(rm.optimalRelays, r)
 		}
 	}
@@ -419,12 +434,19 @@ func (rm *RelayManager) ForceRescore() bool {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	rm.optimalRelays = make([]*RelayNode, 0)
+	// 更新所有节点
+	rm.allNodes = make([]*RelayNode, 0, len(results))
 	for _, r := range results {
+		r.LastCheck = now
+		r.Score = rm.calculateScore(r.Latency, r.FailCount)
+		rm.allNodes = append(rm.allNodes, r)
+	}
+
+	// 仅保留低于延迟阈值的节点作为最优节点
+	rm.optimalRelays = make([]*RelayNode, 0)
+	for _, r := range rm.allNodes {
 		if r.Latency < rm.cfg.GetRelayMaxLatency() {
 			r.FailCount = 0
-			r.LastCheck = now
-			r.Score = rm.calculateScore(r.Latency, r.FailCount)
 			rm.optimalRelays = append(rm.optimalRelays, r)
 		}
 	}
@@ -465,19 +487,25 @@ func (rm *RelayManager) GetStats() RelayStats {
 	defer rm.mu.RUnlock()
 
 	stats := RelayStats{
-		TotalNodes: len(rm.optimalRelays),
+		TotalNodes: len(rm.allNodes),
 		TotalTests: rm.totalTestCount,
 		Removed:    rm.totalRemovedCount,
 	}
 
-	if len(rm.optimalRelays) > 0 {
+	// 优先从最优节点获取延迟统计，如果没有则使用所有节点
+	nodes := rm.optimalRelays
+	if len(nodes) == 0 && len(rm.allNodes) > 0 {
+		nodes = rm.allNodes
+	}
+
+	if len(nodes) > 0 {
 		total := time.Duration(0)
-		for _, r := range rm.optimalRelays {
+		for _, r := range nodes {
 			total += r.Latency
 		}
-		stats.AvgLatency = total / time.Duration(len(rm.optimalRelays))
-		stats.BestLatency = rm.optimalRelays[0].Latency
-		stats.WorstLatency = rm.optimalRelays[len(rm.optimalRelays)-1].Latency
+		stats.AvgLatency = total / time.Duration(len(nodes))
+		stats.BestLatency = nodes[0].Latency
+		stats.WorstLatency = nodes[len(nodes)-1].Latency
 	}
 
 	return stats

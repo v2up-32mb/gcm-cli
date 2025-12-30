@@ -262,6 +262,61 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_dns_cache_hit_rate gauge")
 	lines = append(lines, fmt.Sprintf("gcm_dns_cache_hit_rate %.2f", dnsStats.HitRate))
 
+	// 全局流量统计
+	lines = append(lines, "# HELP gcm_bytes_sent_total 总发送字节数")
+	lines = append(lines, "# TYPE gcm_bytes_sent_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_bytes_sent_total %d", poolStats.BytesSent))
+
+	lines = append(lines, "# HELP gcm_bytes_received_total 总接收字节数")
+	lines = append(lines, "# TYPE gcm_bytes_received_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_bytes_received_total %d", poolStats.BytesReceived))
+
+	// 连接池创建/关闭统计
+	lines = append(lines, "# HELP gcm_pool_created_total 创建连接总数")
+	lines = append(lines, "# TYPE gcm_pool_created_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_pool_created_total %d", poolStats.CreatedConnections))
+
+	lines = append(lines, "# HELP gcm_pool_closed_total 关闭连接总数")
+	lines = append(lines, "# TYPE gcm_pool_closed_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_pool_closed_total %d", poolStats.ClosedConnections))
+
+	// 全局速率统计（聚合所有连接）
+	var totalSendAvg, totalSendMax, totalRecvAvg, totalRecvMax float64
+	connData = s.pool.GetConnectionsData()
+	if len(connData) > 0 {
+		// 计算所有连接的平均速率的平均值，以及最大速率的最大值
+		var sumSendAvg, sumRecvAvg float64
+		for _, cd := range connData {
+			// 从连接的 TrafficCounter 获取速率数据
+			sumSendAvg += cd.RateSnapshot.AvgSent
+			sumRecvAvg += cd.RateSnapshot.AvgRecv
+			if cd.RateSnapshot.MaxSent > totalSendMax {
+				totalSendMax = cd.RateSnapshot.MaxSent
+			}
+			if cd.RateSnapshot.MaxRecv > totalRecvMax {
+				totalRecvMax = cd.RateSnapshot.MaxRecv
+			}
+		}
+		totalSendAvg = sumSendAvg / float64(len(connData))
+		totalRecvAvg = sumRecvAvg / float64(len(connData))
+	}
+
+	lines = append(lines, "# HELP gcm_rate_send_avg 平均发送速率(字节/秒)")
+	lines = append(lines, "# TYPE gcm_rate_send_avg gauge")
+	lines = append(lines, fmt.Sprintf("gcm_rate_send_avg %.0f", totalSendAvg))
+
+	lines = append(lines, "# HELP gcm_rate_send_max 最大发送速率(字节/秒)")
+	lines = append(lines, "# TYPE gcm_rate_send_max gauge")
+	lines = append(lines, fmt.Sprintf("gcm_rate_send_max %.0f", totalSendMax))
+
+	lines = append(lines, "# HELP gcm_rate_recv_avg 平均接收速率(字节/秒)")
+	lines = append(lines, "# TYPE gcm_rate_recv_avg gauge")
+	lines = append(lines, fmt.Sprintf("gcm_rate_recv_avg %.0f", totalRecvAvg))
+
+	lines = append(lines, "# HELP gcm_rate_recv_max 最大接收速率(字节/秒)")
+	lines = append(lines, "# TYPE gcm_rate_recv_max gauge")
+	lines = append(lines, fmt.Sprintf("gcm_rate_recv_max %.0f", totalRecvMax))
+
 	// 中转节点指标（带超时保护）
 	s.log.Debug("[METRICS] 获取 relay stats...")
 	type relayResult struct {
