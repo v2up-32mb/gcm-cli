@@ -391,9 +391,9 @@
             // Request stats
             requestChart.data.datasets[0].data = [
                 metrics.gcm_requests_total || 0,
-                metrics.gcm_requests_successes_total || 0,
-                metrics.gcm_requests_failures_total || 0,
-                metrics.gcm_requests_timeouts_total || 0
+                metrics.gcm_requests_success_total || 0,
+                metrics.gcm_requests_failure_total || 0,
+                metrics.gcm_requests_timeout_total || 0
             ];
             requestChart.update();
 
