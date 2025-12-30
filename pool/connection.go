@@ -1100,10 +1100,10 @@ func (p *ConnectionPool) maintainPool() {
 		totalStreams := 0
 		activeConnCount := 0
 		maxStreams := int(p.cfg.MaxStreamsPerConnection)
-		allAtThreshold := true // 所有连接是否都达到高利用率阈值
+		hasHighLoadConn := false // 是否有高负载连接
 
-		// 流数阈值：maxStreams 的 80%，超过此值认为需要扩容
-		streamThreshold := max(int(float64(maxStreams)*0.8), 1)
+		// 流数阈值：maxStreams 的 60%，超过此值认为连接负载较高
+		streamThreshold := max(int(float64(maxStreams)*0.6), 1)
 
 		for item, mgr := range p.managerByConn {
 			if item.WS == nil {
@@ -1113,15 +1113,15 @@ func (p *ConnectionPool) maintainPool() {
 			totalStreams += streamCount
 			activeConnCount++
 
-			// 只要有一个连接未达到阈值，就认为不需要扩容
-			if streamCount < streamThreshold {
-				allAtThreshold = false
+			// 只要有一个连接达到或超过阈值，就标记为高负载
+			if streamCount >= streamThreshold {
+				hasHighLoadConn = true
 			}
 		}
 		p.mu.RUnlock()
 
-		// 当所有活跃连接都达到高利用率阈值时，提前扩容
-		if activeConnCount > 0 && allAtThreshold {
+		// 当存在高负载连接时，提前扩容（避免等到 100% 才触发）
+		if activeConnCount > 0 && hasHighLoadConn {
 			needExpansion = true
 			reason = fmt.Sprintf("连接高负载(活跃:%d,总流:%d,阈值:%d)",
 				activeConnCount, totalStreams, streamThreshold)
@@ -1201,48 +1201,58 @@ func (p *ConnectionPool) logStats() {
 	total := len(p.pool) + int(atomic.LoadInt32(&p.activeConnections)) +
 		int(atomic.LoadInt32(&p.pendingConnections))
 
-	if total > 0 {
-		p.log.Debug("连接池状态: 空闲 %d | 活跃 %d | 建立中 %d | 等待队列 %d",
-			len(p.pool), atomic.LoadInt32(&p.activeConnections),
-			atomic.LoadInt32(&p.pendingConnections), len(p.requestQueue))
+	if total == 0 {
+		return
+	}
 
-		// 输出所有连接的 RTT 延迟（DEBUG级别）
-		// 注意：所有连接都在 managerByConn 中，不再从 p.pool 统计以避免重复
-		type connInfo struct {
-			id      string
-			rtt     time.Duration
-			streams int
-		}
+	idle := len(p.pool)
+	active := int(atomic.LoadInt32(&p.activeConnections))
+	pending := int(atomic.LoadInt32(&p.pendingConnections))
+	queued := len(p.requestQueue)
 
-		var allConns []connInfo
+	// 收集所有连接信息（包含 RTT 和 Stream 数）
+	type connInfo struct {
+		id      string
+		rtt     time.Duration
+		streams int
+	}
 
-		// 从 managerByConn 获取所有连接
-		for item, mgr := range p.managerByConn {
-			connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
-			allConns = append(allConns, connInfo{
-				id:      connIDStr,
-				rtt:     item.RTT,
-				streams: mgr.GetStreamCount(),
-			})
-		}
+	var allConns []connInfo
 
-		if len(allConns) > 0 {
-			// 按 RTT 排序
-			sort.Slice(allConns, func(i, j int) bool {
-				return allConns[i].rtt < allConns[j].rtt
-			})
+	// 从 managerByConn 获取所有连接
+	p.mu.RLock()
+	for item, mgr := range p.managerByConn {
+		connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+		allConns = append(allConns, connInfo{
+			id:      connIDStr,
+			rtt:     item.RTT,
+			streams: mgr.GetStreamCount(),
+		})
+	}
+	p.mu.RUnlock()
 
-			var parts []string
-			for _, c := range allConns {
-				status := "I"
-				if c.streams > 0 {
-					status = "A"
-				}
-				parts = append(parts, fmt.Sprintf("[%s:%dms:%ds:%s]",
-					c.id, c.rtt.Milliseconds(), c.streams, status))
+	if len(allConns) > 0 {
+		// 按 RTT 排序
+		sort.Slice(allConns, func(i, j int) bool {
+			return allConns[i].rtt < allConns[j].rtt
+		})
+
+		var connParts []string
+		for _, c := range allConns {
+			status := "I"
+			if c.streams > 0 {
+				status = "A"
 			}
-			p.log.Debug("所有连接RTT: %s", strings.Join(parts, " "))
+			connParts = append(connParts, fmt.Sprintf("[%s:%dms:%ds:%s]",
+				c.id, c.rtt.Milliseconds(), c.streams, status))
 		}
+
+		// 合并输出：连接池状态 + 所有连接 RTT 信息
+		p.log.Debug("连接池: 空闲%d 活跃%d 建立中%d 等队列%d | 连接: %s",
+			idle, active, pending, queued, strings.Join(connParts, " "))
+	} else {
+		p.log.Debug("连接池: 空闲%d 活跃%d 建立中%d 等队列%d",
+			idle, active, pending, queued)
 	}
 }
 

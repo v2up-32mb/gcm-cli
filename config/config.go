@@ -272,7 +272,7 @@ func DefaultConfig() *Config {
 		LogLevel:      INFO,
 
 		// 连接池配置
-		MinPoolSize:       3,
+		MinPoolSize:       5,
 		MaxPoolSize:       15,
 		ConnectionTTL:     yamlDuration{5 * time.Minute},
 		ConnectionTimeout: yamlDuration{time.Second},
@@ -319,7 +319,7 @@ func DefaultConfig() *Config {
 		// 连接池动态调整配置
 		EnableDynamicPool:        true,
 		DynamicPoolInterval:      yamlDuration{time.Minute},
-		DynamicPoolMinSize:       2,
+		DynamicPoolMinSize:       5,
 		DynamicPoolMaxSize:       15,
 		DynamicPoolLowThreshold:  0.3,
 		DynamicPoolHighThreshold: 0.8,
