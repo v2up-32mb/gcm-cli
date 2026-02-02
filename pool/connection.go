@@ -23,6 +23,7 @@ import (
 // EchManagerInterface ECH 管理器接口
 type EchManagerInterface interface {
 	GetTlsConfig(domain string, useEch bool) (*tls.Config, error)
+	Refresh(domain string) error
 }
 
 // ConnItem 连接项
@@ -129,6 +130,11 @@ type ConnectionPool struct {
 	currentRelay       *relay.RelayNode
 	lastRelayFetchTime time.Time
 	currentMinPoolSize int32
+
+	// ECH 降级控制
+	echFailureCount    int32     // ECH 连续失败次数
+	echDisabledUntil   time.Time // ECH 禁用截止时间
+	echFallbackEnabled bool      // 是否已启用 ECH 降级
 
 	stats    PoolStats
 	stopChan chan struct{}
@@ -297,10 +303,17 @@ func (p *ConnectionPool) generateWSID() []byte {
 	return buf
 }
 
-// getTLSConfig 获取 TLS 配置（支持 ECH）
+// getTLSConfig 获取 TLS 配置（支持 ECH 和自动降级）
 func (p *ConnectionPool) getTLSConfig() *tls.Config {
+	// 检查 ECH 是否被临时禁用
+	useECH := p.cfg.EnableECH
+	if useECH && time.Now().Before(p.echDisabledUntil) {
+		p.log.Debug("ECH 当前处于降级状态，使用普通 TLS")
+		useECH = false
+	}
+
 	if p.echManager != nil {
-		tlsConfig, err := p.echManager.GetTlsConfig(p.cfg.WorkerHost, p.cfg.EnableECH)
+		tlsConfig, err := p.echManager.GetTlsConfig(p.cfg.WorkerHost, useECH)
 		if err != nil {
 			p.log.Warn("获取 TLS 配置失败，使用默认配置: %v", err)
 			return &tls.Config{
@@ -314,6 +327,61 @@ func (p *ConnectionPool) getTLSConfig() *tls.Config {
 		MinVersion: tls.VersionTLS13,
 		ServerName: p.cfg.WorkerHost,
 	}
+}
+
+// handleDialError 智能处理拨号错误
+func (p *ConnectionPool) handleDialError(err error, relay *relay.RelayNode) {
+	if err == nil {
+		return
+	}
+
+	errStr := err.Error()
+
+	// 1. 判断是否为 ECH 相关错误
+	if p.cfg.EnableECH && p.echManager != nil {
+		if strings.Contains(errStr, "ech") ||
+		   strings.Contains(errStr, "encrypted_client_hello") ||
+		   strings.Contains(errStr, "tls: handshake failure") {
+
+			// 增加 ECH 失败计数
+			failCount := atomic.AddInt32(&p.echFailureCount, 1)
+			p.log.Warn("检测到 ECH 相关错误 (连续失败: %d 次)", failCount)
+
+			// 如果连续失败 3 次，启用降级模式
+			if failCount >= 3 {
+				p.mu.Lock()
+				if !p.echFallbackEnabled {
+					p.echFallbackEnabled = true
+					p.echDisabledUntil = time.Now().Add(5 * time.Minute) // 降级 5 分钟
+					p.log.Warn("ECH 连续失败 %d 次，启用降级模式，将使用普通 TLS (持续 5 分钟)", failCount)
+				}
+				p.mu.Unlock()
+			} else {
+				// 失败次数未达到阈值，尝试刷新配置
+				p.log.Info("尝试刷新 ECH 配置...")
+				go func() {
+					if err := p.echManager.Refresh(p.cfg.ECHDomain); err != nil {
+						p.log.Error("刷新 ECH 配置失败: %v", err)
+					} else {
+						p.log.Info("ECH 配置已刷新")
+					}
+				}()
+			}
+			return
+		}
+	}
+
+	// 2. 判断是否为中转节点连接失败
+	if relay != nil && (strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "timeout")) {
+		p.log.Warn("中转节点连接失败，触发节点重评")
+		go p.handleConnectionFailure()
+		return
+	}
+
+	// 3. 其他错误，仅记录日志
+	p.log.Warn("拨号失败，等待重试: %v", err)
 }
 
 // createConnectionSync 同步创建连接（用于预热），返回成功/失败
@@ -378,16 +446,20 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	ws, resp, err := dialer.Dial(url, headers)
 	if err != nil {
 		atomic.AddInt64(&p.stats.Failures, 1)
-
-		// 连接失败都需要记录警告信息
 		p.log.Warn("连接失败 (%s): %v (目标: %s)", reason, err, url)
 
-		// 触发强制重评
-		go p.handleConnectionFailure()
+		// 智能处理拨号错误
+		p.handleDialError(err, relay)
 
 		return false
 	}
 	defer resp.Body.Close()
+
+	// 连接成功，重置 ECH 失败计数
+	if p.cfg.EnableECH && atomic.LoadInt32(&p.echFailureCount) > 0 {
+		atomic.StoreInt32(&p.echFailureCount, 0)
+		p.log.Debug("连接成功，重置 ECH 失败计数")
+	}
 
 	latency := time.Since(startTime)
 	connectionID := p.generateWSID()
@@ -526,16 +598,20 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	if err != nil {
 		atomic.AddInt64(&p.stats.Failures, 1)
-
-		// 连接失败都需要记录警告信息
 		p.log.Warn("连接失败 (%s): %v (目标: %s)", reason, err, url)
 
-		// 触发强制重评
-		go p.handleConnectionFailure()
+		// 智能处理拨号错误
+		p.handleDialError(err, relay)
 
 		return false
 	}
 	defer resp.Body.Close()
+
+	// 连接成功，重置 ECH 失败计数
+	if p.cfg.EnableECH && atomic.LoadInt32(&p.echFailureCount) > 0 {
+		atomic.StoreInt32(&p.echFailureCount, 0)
+		p.log.Debug("连接成功，重置 ECH 失败计数")
+	}
 
 	latency := time.Since(startTime)
 	connectionID := p.generateWSID()
