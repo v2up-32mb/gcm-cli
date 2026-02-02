@@ -20,6 +20,7 @@ type cacheEntry struct {
 type EchManager struct {
 	mu              sync.RWMutex
 	cache           map[string]*cacheEntry
+	echDomain       string                       // ECH 查询域名
 	dohFunc         func(string) ([]byte, error) // DoH 查询函数
 	cacheTTL        time.Duration                // 缓存 TTL
 	refreshInterval time.Duration                // 定时刷新间隔
@@ -29,9 +30,10 @@ type EchManager struct {
 
 // NewEchManager 创建 ECH 管理器
 // dohClient: DoH 客户端实例，用于查询 HTTPS 记录
+// echDomain: ECH 查询域名，用于获取 HTTPS 记录中的 ECH 配置
 // cacheTTL: 缓存过期时间，默认 24 小时
 // refreshInterval: 定时刷新间隔，默认 12 小时（0 表示禁用定时刷新）
-func NewEchManager(dohClient *dns.DoHClient, cacheTTL time.Duration, refreshInterval time.Duration) *EchManager {
+func NewEchManager(dohClient *dns.DoHClient, echDomain string, cacheTTL time.Duration, refreshInterval time.Duration) *EchManager {
 	if cacheTTL == 0 {
 		cacheTTL = 24 * time.Hour // 默认 24 小时
 	}
@@ -41,7 +43,8 @@ func NewEchManager(dohClient *dns.DoHClient, cacheTTL time.Duration, refreshInte
 	}
 
 	return &EchManager{
-		cache:           make(map[string]*cacheEntry),
+		cache:     make(map[string]*cacheEntry),
+		echDomain: echDomain,
 		dohFunc: func(domain string) ([]byte, error) {
 			return dohClient.GetECHConfig(domain)
 		},
@@ -82,21 +85,25 @@ func (em *EchManager) GetTlsConfig(domain string, useEch bool) (*tls.Config, err
 }
 
 // getECHConfig 获取 ECH 配置（带缓存）
+// domain 参数保留用于日志，实际查询使用 em.echDomain
 func (em *EchManager) getECHConfig(domain string) ([]byte, error) {
+	// 使用 echDomain 作为缓存键
+	cacheKey := em.echDomain
+
 	// 先尝试从缓存读取
 	em.mu.RLock()
-	entry, exists := em.cache[domain]
+	entry, exists := em.cache[cacheKey]
 	em.mu.RUnlock()
 
 	// 缓存命中且未过期
 	if exists && time.Now().Before(entry.expiresAt) {
-		em.log.Debug("ECH 缓存命中: %s", domain)
+		em.log.Debug("ECH 缓存命中: %s (查询域名: %s)", cacheKey, domain)
 		return entry.echConfig, nil
 	}
 
 	// 缓存未命中或已过期，需要查询
-	em.log.Debug("ECH 缓存未命中或已过期: %s，开始查询", domain)
-	return em.fetchAndCache(domain)
+	em.log.Debug("ECH 缓存未命中或已过期: %s，开始查询", cacheKey)
+	return em.fetchAndCache(cacheKey)
 }
 
 // fetchAndCache 从 DoH 查询 ECH 配置并缓存
@@ -218,40 +225,18 @@ func (em *EchManager) autoRefreshLoop() {
 	}
 }
 
-// refreshAllCached 刷新所有已缓存的域名
+// refreshAllCached 刷新 ECH 配置
 func (em *EchManager) refreshAllCached() {
-	// 获取所有需要刷新的域名列表
-	em.mu.RLock()
-	domains := make([]string, 0, len(em.cache))
-	for domain := range em.cache {
-		domains = append(domains, domain)
-	}
-	em.mu.RUnlock()
-
-	if len(domains) == 0 {
-		em.log.Debug("ECH 缓存为空，跳过定时刷新")
-		return
-	}
-
-	em.log.Info("开始定时刷新 %d 个域名的 ECH 配置", len(domains))
+	em.log.Info("开始定时刷新 ECH 配置: %s", em.echDomain)
 	startTime := time.Now()
 
-	// 并发刷新所有域名
-	successCount := 0
-	failCount := 0
-
-	for _, domain := range domains {
-		if err := em.Refresh(domain); err != nil {
-			em.log.Warn("刷新 %s 的 ECH 配置失败: %v", domain, err)
-			failCount++
-		} else {
-			successCount++
-		}
+	// 刷新 echDomain
+	if err := em.Refresh(em.echDomain); err != nil {
+		em.log.Warn("刷新 %s 的 ECH 配置失败: %v", em.echDomain, err)
+	} else {
+		elapsed := time.Since(startTime)
+		em.log.Info("ECH 定时刷新完成 (耗时: %v)", elapsed)
 	}
-
-	elapsed := time.Since(startTime)
-	em.log.Info("ECH 定时刷新完成 (成功: %d, 失败: %d, 耗时: %v)",
-		successCount, failCount, elapsed)
 }
 
 // StopAutoRefresh 停止定时刷新任务

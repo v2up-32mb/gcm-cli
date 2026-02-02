@@ -82,10 +82,11 @@ func main() {
 		log.Info("正在初始化 ECH 管理器...")
 		echManager = ech.NewEchManager(
 			dohClient,
+			cfg.ECHDomain,
 			cfg.GetECHCacheTTL(),
 			cfg.GetECHRefreshInterval(),
 		)
-		log.Debug("ECH 管理器初始化完成")
+		log.Debug("ECH 管理器初始化完成 (查询域名: %s)", cfg.ECHDomain)
 	}
 
 	// 初始化连接池

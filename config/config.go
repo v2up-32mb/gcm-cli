@@ -150,6 +150,7 @@ type Config struct {
 
 	// ECH 配置
 	EnableECH          bool         `yaml:"enableECH" json:"enableECH"`
+	ECHDomain          string       `yaml:"echDomain" json:"echDomain"`
 	ECHCacheTTL        yamlDuration `yaml:"echCacheTTL" json:"echCacheTTL"`
 	ECHRefreshInterval yamlDuration `yaml:"echRefreshInterval" json:"echRefreshInterval"`
 
@@ -311,6 +312,7 @@ func DefaultConfig() *Config {
 
 		// ECH 配置
 		EnableECH:          false,
+		ECHDomain:          "cloudflare-ech.com",
 		ECHCacheTTL:        yamlDuration{24 * time.Hour},
 		ECHRefreshInterval: yamlDuration{12 * time.Hour},
 
