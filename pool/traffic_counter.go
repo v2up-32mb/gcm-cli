@@ -9,22 +9,22 @@ import (
 // TrafficCounter 原子流量计数器
 // 用于统计连接级别的上传/下载流量和 Stream 数量
 type TrafficCounter struct {
-	bytesSent   int64
-	bytesRecv   int64
-	streamCount int64 // 经过的 Stream 总数（累计）
+	bytesSent     int64
+	bytesRecv     int64
+	streamCount   int64 // 经过的 Stream 总数（累计）
 	activeStreams int64 // 当前活跃 Stream 数量
 
 	// 速率统计
-	lastSentUpdate   int64     // 上次发送流量更新时间 (Unix 纳秒)
-	lastRecvUpdate   int64     // 上次接收流量更新时间 (Unix 纳秒)
-	lastSentBytes    int64     // 上次发送字节数
-	lastRecvBytes    int64     // 上次接收字节数
-	avgSendRate      float64   // 平均发送速率 (字节/秒)
-	avgRecvRate      float64   // 平均接收速率 (字节/秒)
-	maxSendRate      float64   // 最大发送速率 (字节/秒)
-	maxRecvRate      float64   // 最大接收速率 (字节/秒)
-	totalSendSamples int64     // 发送速率采样次数
-	totalRecvSamples int64     // 接收速率采样次数
+	lastSentUpdate   int64   // 上次发送流量更新时间 (Unix 纳秒)
+	lastRecvUpdate   int64   // 上次接收流量更新时间 (Unix 纳秒)
+	lastSentBytes    int64   // 上次发送字节数
+	lastRecvBytes    int64   // 上次接收字节数
+	avgSendRate      float64 // 平均发送速率 (字节/秒)
+	avgRecvRate      float64 // 平均接收速率 (字节/秒)
+	maxSendRate      float64 // 最大发送速率 (字节/秒)
+	maxRecvRate      float64 // 最大接收速率 (字节/秒)
+	totalSendSamples int64   // 发送速率采样次数
+	totalRecvSamples int64   // 接收速率采样次数
 }
 
 // AddSent 增加发送字节数（客户端 → WebSocket → Worker）

@@ -26,10 +26,10 @@ type ConnItem struct {
 	RelayAddr    string // 中转节点地址
 	CreatedAt    time.Time
 	RTT          time.Duration
-	Streams      int        // 当前活跃流数
-	Traffic      *TrafficCounter // 流量计数器
-	mu           sync.Mutex // 保护 Streams 和 targets
-	writeMu      sync.Mutex // 保护 WS 写操作
+	Streams      int                 // 当前活跃流数
+	Traffic      *TrafficCounter     // 流量计数器
+	mu           sync.Mutex          // 保护 Streams 和 targets
+	writeMu      sync.Mutex          // 保护 WS 写操作
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
 }
 
@@ -113,8 +113,8 @@ type ConnectionPool struct {
 	pendingConnections int32
 	requestQueue       chan *connRequest
 	// StreamManager 集成: 每条连接对应一个 StreamManager
-	managerByConn      map[*ConnItem]*StreamManager
-	pendingHeartbeats  map[string]time.Time
+	managerByConn     map[*ConnItem]*StreamManager
+	pendingHeartbeats map[string]time.Time
 
 	// 目标地址亲和性映射 (用于多路复用优化)
 	targetToConn map[string]*ConnItem // 目标地址 -> 当前服务的连接
@@ -326,7 +326,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	if relay != nil {
 		// 中转模式：URL 仍用原始 Worker，但通过 NetDial 将 TCP 连接到中转节点
-		url = fmt.Sprintf("wss://%s/", p.cfg.WorkerHost)
+		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
 		customDial = func(network, addr string) (net.Conn, error) {
 			// addr 是 workerHost:443，替换为中转节点的 IP:PORT
 			return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
@@ -334,7 +334,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
 	} else {
 		// 直连模式：也需要设置 DialTimeout，否则会无限期等待
-		url = fmt.Sprintf("wss://%s/", p.cfg.WorkerHost)
+		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
 		customDial = func(network, addr string) (net.Conn, error) {
 			return net.DialTimeout(network, addr, p.cfg.GetConnectionTimeout())
 		}
@@ -343,10 +343,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	headers = make(http.Header)
 	headers.Set("Host", p.cfg.WorkerHost)
-	headers.Set("User-Agent", "GoClient/1.0")
-	if p.cfg.ProxyToken != "" {
-		headers.Set("Sec-WebSocket-Protocol", p.cfg.ProxyToken)
-	}
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
 
 	// 配置 WebSocket Dialer
 	dialer := websocket.Dialer{
@@ -443,7 +440,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	if relay != nil {
 		// 中转模式：URL 仍用原始 Worker，但通过 NetDial 将 TCP 连接到中转节点
-		url = fmt.Sprintf("wss://%s/", p.cfg.WorkerHost)
+		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
 		customDial = func(network, addr string) (net.Conn, error) {
 			// addr 是 workerHost:443，替换为中转节点的 IP:PORT
 			return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
@@ -451,7 +448,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
 	} else {
 		// 直连模式：也需要设置 DialTimeout，否则会无限期等待
-		url = fmt.Sprintf("wss://%s/", p.cfg.WorkerHost)
+		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
 		customDial = func(network, addr string) (net.Conn, error) {
 			return net.DialTimeout(network, addr, p.cfg.GetConnectionTimeout())
 		}
@@ -460,10 +457,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	headers = make(http.Header)
 	headers.Set("Host", p.cfg.WorkerHost)
-	headers.Set("User-Agent", "GoClient/1.0")
-	if p.cfg.ProxyToken != "" {
-		headers.Set("Sec-WebSocket-Protocol", p.cfg.ProxyToken)
-	}
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
 
 	// 配置 WebSocket Dialer
 	dialer := websocket.Dialer{
@@ -473,7 +467,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	// 使用 channel 和 goroutine 实现可靠的超时保护
 	type dialResult struct {
-		ws  *websocket.Conn
+		ws   *websocket.Conn
 		resp *http.Response
 		err  error
 	}
@@ -1567,7 +1561,7 @@ type ConnectionData struct {
 	RTT          time.Duration
 	Sent         int64
 	Recv         int64
-	StreamCount  int // 使用 StreamManager.GetStreamCount() 作为权威来源
+	StreamCount  int          // 使用 StreamManager.GetStreamCount() 作为权威来源
 	RateSnapshot RateSnapshot // 速率快照数据
 }
 

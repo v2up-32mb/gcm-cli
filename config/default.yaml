@@ -3,9 +3,9 @@
 # 使用方法: gcm-go -c config.yaml
 
 # ===== 基本配置 =====
-workerHost: ""                 # Worker 地址（必须指定）
+workerHost: ""                  # Worker 地址（必须指定）
 listenAddress: ":10080"         # SOCKS5 监听地址（如 ":10080" 或 "0.0.0.0:10080"）
-proxyToken: ""                  # 代理访问令牌（可选）
+userID: ""                      # 代理访问令牌（可选）
 logLevel: "INFO"                # 日志级别: DEBUG/INFO/WARN/ERROR
 
 # ===== 连接池配置 =====

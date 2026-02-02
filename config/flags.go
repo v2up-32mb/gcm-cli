@@ -34,9 +34,9 @@ func DefineFlags() []cli.Flag {
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
-			Name:     "token",
-			Aliases:  []string{"t"},
-			Usage:    "代理访问令牌",
+			Name:     "user-id",
+			Aliases:  []string{"u"},
+			Usage:    "用户鉴权ID",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
@@ -196,8 +196,8 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	if cmd.IsSet("listen") {
 		cfg.ListenAddress = cmd.String("listen")
 	}
-	if cmd.IsSet("token") {
-		cfg.ProxyToken = cmd.String("token")
+	if cmd.IsSet("user-id") {
+		cfg.UserID = cmd.String("user-id")
 	}
 	if cmd.IsSet("log-level") {
 		cfg.LogLevel = ParseLogLevel(cmd.String("log-level"))
