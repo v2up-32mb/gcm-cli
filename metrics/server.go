@@ -202,17 +202,21 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_requests_success_rate gauge")
 	lines = append(lines, fmt.Sprintf("gcm_requests_success_rate %.2f", poolStats.SuccessRate))
 
-	lines = append(lines, "# HELP gcm_request_duration_min_ms 最低请求延迟(毫秒)")
-	lines = append(lines, "# TYPE gcm_request_duration_min_ms gauge")
+	lines = append(lines, "# HELP gcm_request_duration_min 最低请求延迟(毫秒)")
+	lines = append(lines, "# TYPE gcm_request_duration_min gauge")
 	if poolStats.MinResponseTime >= 0 {
-		lines = append(lines, fmt.Sprintf("gcm_request_duration_min_ms %.0f", poolStats.MinResponseTime))
+		lines = append(lines, fmt.Sprintf("gcm_request_duration_min %.0f", poolStats.MinResponseTime))
 	} else {
-		lines = append(lines, "gcm_request_duration_min_ms 0")
+		lines = append(lines, "gcm_request_duration_min 0")
 	}
 
-	lines = append(lines, "# HELP gcm_request_duration_max_ms 最高请求延迟(毫秒)")
-	lines = append(lines, "# TYPE gcm_request_duration_max_ms gauge")
-	lines = append(lines, fmt.Sprintf("gcm_request_duration_max_ms %.0f", poolStats.MaxResponseTime))
+	lines = append(lines, "# HELP gcm_request_duration_max 最高请求延迟(毫秒)")
+	lines = append(lines, "# TYPE gcm_request_duration_max gauge")
+	lines = append(lines, fmt.Sprintf("gcm_request_duration_max %.0f", poolStats.MaxResponseTime))
+
+	lines = append(lines, "# HELP gcm_request_duration_avg 平均请求延迟(毫秒)")
+	lines = append(lines, "# TYPE gcm_request_duration_avg gauge")
+	lines = append(lines, fmt.Sprintf("gcm_request_duration_avg %.2f", poolStats.AvgResponseTime))
 
 	// Per-connection 流量指标说明
 	lines = append(lines, "# HELP gcm_conn_bytes_sent 单个 WebSocket 连接的发送字节数")
@@ -261,6 +265,12 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# HELP gcm_dns_cache_hit_rate DNS缓存命中率")
 	lines = append(lines, "# TYPE gcm_dns_cache_hit_rate gauge")
 	lines = append(lines, fmt.Sprintf("gcm_dns_cache_hit_rate %.2f", dnsStats.HitRate))
+
+	// DNS 总请求数
+	totalDnsRequests := dnsStats.Hits + dnsStats.Misses
+	lines = append(lines, "# HELP gcm_dns_requests_total DNS总请求数")
+	lines = append(lines, "# TYPE gcm_dns_requests_total counter")
+	lines = append(lines, fmt.Sprintf("gcm_dns_requests_total %d", totalDnsRequests))
 
 	// 全局流量统计
 	lines = append(lines, "# HELP gcm_bytes_sent_total 总发送字节数")
@@ -368,6 +378,11 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# HELP gcm_relay_removed_nodes 移除节点总数")
 	lines = append(lines, "# TYPE gcm_relay_removed_nodes counter")
 	lines = append(lines, fmt.Sprintf("gcm_relay_removed_nodes %d", relayStats.Removed))
+
+	// 运行时间
+	lines = append(lines, "# HELP gcm_uptime_seconds 运行时间(秒)")
+	lines = append(lines, "# TYPE gcm_uptime_seconds gauge")
+	lines = append(lines, fmt.Sprintf("gcm_uptime_seconds %.2f", poolStats.Uptime.Seconds()))
 
 	// 生成输出
 	s.log.Debug("[METRICS] 生成输出...")
