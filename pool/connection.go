@@ -192,6 +192,7 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr 
 	go p.heartbeatLoop()
 	go p.trafficReportLoop()
 	go p.rateUpdateLoop()
+	go p.congestionControlLoop() // 拥塞控制循环
 
 	if cfg.EnableDynamicPool {
 		go p.dynamicPoolLoop()
@@ -1751,4 +1752,123 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// GetStream 获取指定的 Stream 对象（用于流控）
+func (p *ConnectionPool) GetStream(conn *ConnItem, streamID byte) *Stream {
+	if conn == nil {
+		return nil
+	}
+
+	p.mu.RLock()
+	mgr, exists := p.managerByConn[conn]
+	p.mu.RUnlock()
+
+	if !exists || mgr == nil {
+		return nil
+	}
+
+	mgr.mu.RLock()
+	defer mgr.mu.RUnlock()
+
+	return mgr.streams[streamID]
+}
+
+// congestionControlLoop 拥塞控制循环
+func (p *ConnectionPool) congestionControlLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			p.adjustAllStreamsWindow()
+		case <-p.stopChan:
+			return
+		}
+	}
+}
+
+// adjustAllStreamsWindow 调整所有活跃 Stream 的窗口大小
+func (p *ConnectionPool) adjustAllStreamsWindow() {
+	p.mu.RLock()
+	managers := make([]*StreamManager, 0, len(p.managerByConn))
+	for _, mgr := range p.managerByConn {
+		managers = append(managers, mgr)
+	}
+	p.mu.RUnlock()
+
+	adjustedCount := 0
+	for _, mgr := range managers {
+		mgr.mu.RLock()
+		streams := make([]*Stream, 0, len(mgr.streams))
+		for _, s := range mgr.streams {
+			streams = append(streams, s)
+		}
+		mgr.mu.RUnlock()
+
+		for _, stream := range streams {
+			stream.AdjustWindowSize()
+			adjustedCount++
+		}
+	}
+
+	if adjustedCount > 0 {
+		p.log.Debug("拥塞控制: 调整了 %d 个 Stream 的窗口大小", adjustedCount)
+	}
+}
+
+// GetFlowControlStats 获取窗口流控和拥塞控制统计
+func (p *ConnectionPool) GetFlowControlStats() (avgWindow, minWindow, maxWindow int64, avgRTT time.Duration, avgLossRate float64, streamCount int) {
+	p.mu.RLock()
+	managers := make([]*StreamManager, 0, len(p.managerByConn))
+	for _, mgr := range p.managerByConn {
+		managers = append(managers, mgr)
+	}
+	p.mu.RUnlock()
+
+	var totalWindow int64
+	var totalRTT time.Duration
+	var totalLossRate float64
+	minWindow = MaxWindowSize
+	maxWindow = MinWindowSize
+
+	for _, mgr := range managers {
+		mgr.mu.RLock()
+		streams := make([]*Stream, 0, len(mgr.streams))
+		for _, s := range mgr.streams {
+			streams = append(streams, s)
+		}
+		mgr.mu.RUnlock()
+
+		for _, stream := range streams {
+			windowSize := atomic.LoadInt64(&stream.windowSize)
+			totalWindow += windowSize
+			if windowSize < minWindow {
+				minWindow = windowSize
+			}
+			if windowSize > maxWindow {
+				maxWindow = windowSize
+			}
+
+			rtt := stream.GetAverageRTT()
+			if rtt > 0 {
+				totalRTT += rtt
+			}
+
+			totalLossRate += stream.GetLossRate()
+			streamCount++
+		}
+	}
+
+	if streamCount > 0 {
+		avgWindow = totalWindow / int64(streamCount)
+		avgRTT = totalRTT / time.Duration(streamCount)
+		avgLossRate = totalLossRate / float64(streamCount)
+	} else {
+		minWindow = 0
+		maxWindow = 0
+	}
+
+	return
 }

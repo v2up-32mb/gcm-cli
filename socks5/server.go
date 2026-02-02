@@ -322,6 +322,16 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 			} else {
 				if msg.Type == protocol.MsgTypeData {
 					if len(msg.Data) > 0 {
+						// 窗口流控：消耗接收窗口
+						stream := s.pool.GetStream(connItem, streamID)
+						if stream != nil {
+							if err := stream.ConsumeRecvWindow(len(msg.Data)); err != nil {
+								s.log.Debug("接收窗口耗尽: %v", err)
+								cleanup()
+								return
+							}
+						}
+
 						bytesReceived += int64(len(msg.Data))
 						// 更新连接流量统计（接收）
 						connItem.Traffic.AddRecv(int64(len(msg.Data)))
@@ -358,6 +368,16 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 			}
 
 			if connected {
+				// 窗口流控：等待发送窗口有足够空间
+				stream := s.pool.GetStream(connItem, streamID)
+				if stream != nil {
+					if err := stream.WaitForSendWindow(n); err != nil {
+						s.log.Debug("发送窗口等待超时: %v", err)
+						cleanup()
+						return
+					}
+				}
+
 				bytesSent += int64(n)
 				// 更新连接流量统计（发送）
 				connItem.Traffic.AddSent(int64(n))

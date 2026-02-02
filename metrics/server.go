@@ -384,6 +384,34 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_uptime_seconds gauge")
 	lines = append(lines, fmt.Sprintf("gcm_uptime_seconds %.2f", poolStats.Uptime.Seconds()))
 
+	// 窗口流控和拥塞控制指标
+	s.log.Debug("[METRICS] 获取流控统计...")
+	avgWindow, minWindow, maxWindow, avgRTT, avgLossRate, streamCount := s.pool.GetFlowControlStats()
+
+	lines = append(lines, "# HELP gcm_flow_window_avg 平均窗口大小(字节)")
+	lines = append(lines, "# TYPE gcm_flow_window_avg gauge")
+	lines = append(lines, fmt.Sprintf("gcm_flow_window_avg %d", avgWindow))
+
+	lines = append(lines, "# HELP gcm_flow_window_min 最小窗口大小(字节)")
+	lines = append(lines, "# TYPE gcm_flow_window_min gauge")
+	lines = append(lines, fmt.Sprintf("gcm_flow_window_min %d", minWindow))
+
+	lines = append(lines, "# HELP gcm_flow_window_max 最大窗口大小(字节)")
+	lines = append(lines, "# TYPE gcm_flow_window_max gauge")
+	lines = append(lines, fmt.Sprintf("gcm_flow_window_max %d", maxWindow))
+
+	lines = append(lines, "# HELP gcm_flow_rtt_avg 平均RTT(毫秒)")
+	lines = append(lines, "# TYPE gcm_flow_rtt_avg gauge")
+	lines = append(lines, fmt.Sprintf("gcm_flow_rtt_avg %d", avgRTT.Milliseconds()))
+
+	lines = append(lines, "# HELP gcm_flow_loss_rate 平均丢包率")
+	lines = append(lines, "# TYPE gcm_flow_loss_rate gauge")
+	lines = append(lines, fmt.Sprintf("gcm_flow_loss_rate %.4f", avgLossRate))
+
+	lines = append(lines, "# HELP gcm_flow_stream_count 活跃Stream数量")
+	lines = append(lines, "# TYPE gcm_flow_stream_count gauge")
+	lines = append(lines, fmt.Sprintf("gcm_flow_stream_count %d", streamCount))
+
 	// 生成输出
 	s.log.Debug("[METRICS] 生成输出...")
 	result := ""

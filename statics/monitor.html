@@ -157,6 +157,25 @@
             </div>
         </div>
 
+        <!-- Flow Control Stats -->
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">平均窗口</div>
+                <div id="flow_window_avg" class="text-2xl font-bold text-purple-400 stat-value">--</div>
+                <div class="text-xs text-gray-500 mt-1">KB</div>
+            </div>
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">平均 RTT</div>
+                <div id="flow_rtt_avg" class="text-2xl font-bold text-cyan-400 stat-value">--</div>
+                <div class="text-xs text-gray-500 mt-1">ms</div>
+            </div>
+            <div class="card rounded-xl p-4 text-center">
+                <div class="text-gray-400 text-sm mb-1">丢包率</div>
+                <div id="flow_loss_rate" class="text-2xl font-bold text-red-400 stat-value">--</div>
+                <div class="text-xs text-gray-500 mt-1">%</div>
+            </div>
+        </div>
+
         <!-- Traffic Stats -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
             <div class="card rounded-xl p-6">
@@ -211,6 +230,51 @@
                     <div class="text-center p-3 bg-gray-800/50 rounded-lg">
                         <div class="text-gray-400 text-sm">移除节点</div>
                         <div id="relay_removed" class="text-xl font-bold text-yellow-400">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Flow Control Details -->
+        <div class="card rounded-xl p-6 mb-6">
+            <h3 class="text-lg font-semibold mb-4 text-gray-200">🌊 窗口流控详情</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <h4 class="text-sm text-gray-400 mb-3">窗口大小统计</h4>
+                    <div class="space-y-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-300">平均窗口</span>
+                            <span id="flow_window_avg_detail" class="text-purple-400 font-mono">-- KB</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-300">最小窗口</span>
+                            <span id="flow_window_min" class="text-blue-400 font-mono">-- KB</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-300">最大窗口</span>
+                            <span id="flow_window_max" class="text-green-400 font-mono">-- KB</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-300">活跃 Stream</span>
+                            <span id="flow_stream_count" class="text-yellow-400 font-mono">--</span>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <h4 class="text-sm text-gray-400 mb-3">拥塞控制统计</h4>
+                    <div class="space-y-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-300">平均 RTT</span>
+                            <span id="flow_rtt_avg_detail" class="text-cyan-400 font-mono">-- ms</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-300">丢包率</span>
+                            <span id="flow_loss_rate_detail" class="text-red-400 font-mono">-- %</span>
+                        </div>
+                        <div class="mt-4">
+                            <div class="text-xs text-gray-500 mb-1">拥塞状态</div>
+                            <div id="congestion_status" class="text-sm font-semibold text-green-400">正常</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -440,6 +504,38 @@
             document.getElementById('pool_closed').textContent = metrics.gcm_pool_closed_total ?? '--';
             document.getElementById('relay_nodes').textContent = metrics.gcm_relay_nodes_total ?? '--';
             document.getElementById('relay_removed').textContent = metrics.gcm_relay_removed_nodes ?? '--';
+
+            // Flow Control Stats
+            const avgWindow = (metrics.gcm_flow_window_avg || 0) / 1024; // 转换为 KB
+            const minWindow = (metrics.gcm_flow_window_min || 0) / 1024;
+            const maxWindow = (metrics.gcm_flow_window_max || 0) / 1024;
+            const avgRTT = metrics.gcm_flow_rtt_avg || 0;
+            const lossRate = (metrics.gcm_flow_loss_rate || 0) * 100; // 转换为百分比
+            const streamCount = metrics.gcm_flow_stream_count || 0;
+
+            document.getElementById('flow_window_avg').textContent = avgWindow.toFixed(0);
+            document.getElementById('flow_rtt_avg').textContent = avgRTT;
+            document.getElementById('flow_loss_rate').textContent = lossRate.toFixed(2);
+
+            document.getElementById('flow_window_avg_detail').textContent = avgWindow.toFixed(1) + ' KB';
+            document.getElementById('flow_window_min').textContent = minWindow.toFixed(1) + ' KB';
+            document.getElementById('flow_window_max').textContent = maxWindow.toFixed(1) + ' KB';
+            document.getElementById('flow_stream_count').textContent = streamCount;
+            document.getElementById('flow_rtt_avg_detail').textContent = avgRTT + ' ms';
+            document.getElementById('flow_loss_rate_detail').textContent = lossRate.toFixed(2) + ' %';
+
+            // 拥塞状态判断
+            const congestionStatus = document.getElementById('congestion_status');
+            if (lossRate > 5 || avgRTT > 200) {
+                congestionStatus.textContent = '拥塞';
+                congestionStatus.className = 'text-sm font-semibold text-red-400';
+            } else if (lossRate > 2 || avgRTT > 100) {
+                congestionStatus.textContent = '轻微拥塞';
+                congestionStatus.className = 'text-sm font-semibold text-yellow-400';
+            } else {
+                congestionStatus.textContent = '正常';
+                congestionStatus.className = 'text-sm font-semibold text-green-400';
+            }
 
             // WebSocket table
             const wsData = {};
