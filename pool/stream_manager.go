@@ -57,6 +57,11 @@ type Stream struct {
 	state    StreamState // 当前状态
 	priority int         // 优先级（0=低，1=中，2=高）
 	stateMu  sync.Mutex  // 保护状态转换
+
+	// 流控配置
+	minWindowSize int64         // 最小窗口大小
+	maxWindowSize int64         // 最大窗口大小
+	windowTimeout time.Duration // 窗口等待超时
 }
 
 // StreamManager 管理单个 WebSocket 连接上的所有 stream
@@ -71,16 +76,26 @@ type StreamManager struct {
 	// 位图分配优化 (借鉴 smux 设计)
 	allocBitmap [4]uint64 // 256 bits = 4 x 64-bit words，跟踪 Stream ID 占用状态
 	nextHint    byte      // 上次分配的 ID + 1，避免重复扫描
+
+	// 窗口流控配置
+	defaultWindowSize int64         // 默认窗口大小
+	minWindowSize     int64         // 最小窗口大小
+	maxWindowSize     int64         // 最大窗口大小
+	windowTimeout     time.Duration // 窗口等待超时
 }
 
 // NewStreamManager 创建新的 StreamManager
-func NewStreamManager(conn *ConnItem, maxStreams int) *StreamManager {
+func NewStreamManager(conn *ConnItem, maxStreams int, defaultWindowSize, minWindowSize, maxWindowSize int64, windowTimeout time.Duration) *StreamManager {
 	return &StreamManager{
-		conn:     conn,
-		max:      maxStreams,
-		streams:  make(map[byte]*Stream),
-		log:      logger.GetLogger("StreamMgr"),
-		nextHint: 0, // 从 0 开始分配
+		conn:              conn,
+		max:               maxStreams,
+		streams:           make(map[byte]*Stream),
+		log:               logger.GetLogger("StreamMgr"),
+		nextHint:          0, // 从 0 开始分配
+		defaultWindowSize: defaultWindowSize,
+		minWindowSize:     minWindowSize,
+		maxWindowSize:     maxWindowSize,
+		windowTimeout:     windowTimeout,
 	}
 }
 
@@ -157,14 +172,17 @@ func (sm *StreamManager) tryAllocateStream(targetAddr string) (byte, bool) {
 
 	// 注册 Stream（初始化窗口流控）
 	sm.streams[streamID] = &Stream{
-		ID:           streamID,
-		TargetAddr:   targetAddr,
-		CreatedAt:    time.Now(),
-		LastActiveAt: time.Now(),
-		sendWindow:   DefaultWindowSize,
-		recvWindow:   DefaultWindowSize,
-		windowSize:   DefaultWindowSize,
-		sendBlocked:  make(chan struct{}, 1),
+		ID:            streamID,
+		TargetAddr:    targetAddr,
+		CreatedAt:     time.Now(),
+		LastActiveAt:  time.Now(),
+		sendWindow:    sm.defaultWindowSize,
+		recvWindow:    sm.defaultWindowSize,
+		windowSize:    sm.defaultWindowSize,
+		sendBlocked:   make(chan struct{}, 1),
+		minWindowSize: sm.minWindowSize,
+		maxWindowSize: sm.maxWindowSize,
+		windowTimeout: sm.windowTimeout,
 	}
 
 	sm.conn.mu.Lock()
@@ -415,7 +433,7 @@ func (s *Stream) WaitForSendWindow(n int) error {
 		return nil
 	}
 
-	deadline := time.Now().Add(WindowTimeout)
+	deadline := time.Now().Add(s.windowTimeout)
 	for {
 		// 原子读取当前窗口
 		window := atomic.LoadInt64(&s.sendWindow)
@@ -568,8 +586,8 @@ func (s *Stream) AdjustWindowSize() {
 		// 拥塞：乘性减（减半）
 		currentSize := atomic.LoadInt64(&s.windowSize)
 		newSize := currentSize / 2
-		if newSize < MinWindowSize {
-			newSize = MinWindowSize
+		if newSize < s.minWindowSize {
+			newSize = s.minWindowSize
 		}
 		atomic.StoreInt64(&s.windowSize, newSize)
 
@@ -591,8 +609,8 @@ func (s *Stream) AdjustWindowSize() {
 		// 无拥塞：加性增（每次增加 8KB）
 		currentSize := atomic.LoadInt64(&s.windowSize)
 		newSize := currentSize + 8*1024
-		if newSize > MaxWindowSize {
-			newSize = MaxWindowSize
+		if newSize > s.maxWindowSize {
+			newSize = s.maxWindowSize
 		}
 		atomic.StoreInt64(&s.windowSize, newSize)
 	}

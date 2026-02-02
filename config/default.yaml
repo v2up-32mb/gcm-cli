@@ -82,6 +82,15 @@ enableStats: true               # 是否启用统计增强
 enableMultiplex: true           # 是否启用多路复用（需 Worker 端配合）
 maxStreamsPerConnection: 5      # 每个连接最大并发流数
 
+# ===== 窗口流控配置 =====
+defaultWindowSize: "256KB"      # 默认窗口大小
+minWindowSize: "32KB"           # 最小窗口大小（拥塞时的下限）
+maxWindowSize: "1MB"            # 最大窗口大小（扩展时的上限）
+windowTimeout: "5s"             # 窗口等待超时时间
+
+# ===== 拥塞控制配置 =====
+congestionControlInterval: "1m" # 拥塞控制检查间隔
+
 # ===== ECH 配置 =====
 enableECH: false                # 是否启用 TLS ECH (Encrypted Client Hello)
 echDomain: "cloudflare-ech.com" # ECH 隐藏域名

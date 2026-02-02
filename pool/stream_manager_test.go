@@ -13,7 +13,7 @@ func TestBitmapAllocation(t *testing.T) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	// 测试 1: 分配第一个 Stream ID
 	id1, ok := sm.tryAllocateStream("test1.com:443")
@@ -62,7 +62,7 @@ func TestBitmapFullAllocation(t *testing.T) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	// 分配所有 256 个 ID
 	allocated := make(map[byte]bool)
@@ -95,7 +95,7 @@ func TestBitmapConcurrentAllocation(t *testing.T) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	// 并发分配 100 个 Stream
 	const numGoroutines = 10
@@ -142,7 +142,7 @@ func BenchmarkStreamAllocation(b *testing.B) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -168,7 +168,7 @@ func BenchmarkStreamAllocationWithTimeout(b *testing.B) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -195,7 +195,7 @@ func TestFlowControl(t *testing.T) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	// 分配一个 Stream
 	id, ok := sm.tryAllocateStream("test.com:443")
@@ -231,7 +231,7 @@ func TestCongestionControl(t *testing.T) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	// 分配一个 Stream
 	id, ok := sm.tryAllocateStream("test.com:443")
@@ -271,7 +271,7 @@ func TestStateMachine(t *testing.T) {
 		ConnectionID: []byte{0x01, 0x02, 0x03},
 		Traffic:      &TrafficCounter{},
 	}
-	sm := NewStreamManager(conn, 256)
+	sm := NewStreamManager(conn, 256, 256*1024, 32*1024, 1024*1024, 5*time.Second)
 
 	// 分配一个 Stream
 	id, ok := sm.tryAllocateStream("test.com:443")

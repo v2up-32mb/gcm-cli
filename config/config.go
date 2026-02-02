@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -117,6 +118,103 @@ func (yd *yamlDuration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+// yamlByteSize 是字节大小的包装器，支持 YAML 中的字符串格式（如 "256KB", "1MB"）
+type yamlByteSize struct {
+	Bytes int64
+}
+
+// MarshalYAML 实现 yaml.Marshaler 接口
+func (yb yamlByteSize) MarshalYAML() (interface{}, error) {
+	return formatBytes(yb.Bytes), nil
+}
+
+// UnmarshalYAML 实现 yaml.Unmarshaler 接口
+func (yb *yamlByteSize) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var v interface{}
+	if err := unmarshal(&v); err != nil {
+		return err
+	}
+
+	switch value := v.(type) {
+	case float64:
+		// JSON 数字格式（字节）
+		yb.Bytes = int64(value)
+	case int:
+		// JSON 整数格式（字节）
+		yb.Bytes = int64(value)
+	case string:
+		// YAML 字符串格式（如 "256KB", "1MB"）
+		bytes, err := parseByteSize(value)
+		if err != nil {
+			return fmt.Errorf("无法解析字节大小: %q: %w", value, err)
+		}
+		yb.Bytes = bytes
+	default:
+		return fmt.Errorf("无效的字节大小类型: %T", v)
+	}
+
+	return nil
+}
+
+// parseByteSize 解析字节大小字符串（如 "256KB", "1MB"）
+func parseByteSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+
+	// 提取数字和单位
+	var num float64
+	var unit string
+	_, err := fmt.Sscanf(s, "%f%s", &num, &unit)
+	if err != nil {
+		// 尝试只解析数字（默认为字节）
+		_, err2 := fmt.Sscanf(s, "%f", &num)
+		if err2 != nil {
+			return 0, fmt.Errorf("无效的字节大小格式: %s", s)
+		}
+		return int64(num), nil
+	}
+
+	// 转换单位
+	var multiplier int64
+	switch unit {
+	case "B", "":
+		multiplier = 1
+	case "KB", "K":
+		multiplier = 1024
+	case "MB", "M":
+		multiplier = 1024 * 1024
+	case "GB", "G":
+		multiplier = 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("未知的字节单位: %s", unit)
+	}
+
+	// 检查整数溢出
+	result := num * float64(multiplier)
+	if result > float64(math.MaxInt64) {
+		return 0, fmt.Errorf("字节大小超出范围: %s (最大支持 %d 字节)", s, math.MaxInt64)
+	}
+
+	return int64(result), nil
+}
+
+// formatBytes 格式化字节大小为可读字符串
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	// 防止数组越界（最大支持到 E = Exabyte）
+	if exp >= len("KMGTPE") {
+		exp = len("KMGTPE") - 1
+	}
+	return fmt.Sprintf("%.0f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // Config 应用配置
 type Config struct {
 	// 基本配置
@@ -196,6 +294,15 @@ type Config struct {
 	// 多路复用配置
 	EnableMultiplex         bool `yaml:"enableMultiplex" json:"enableMultiplex"`
 	MaxStreamsPerConnection int  `yaml:"maxStreamsPerConnection" json:"maxStreamsPerConnection"`
+
+	// 窗口流控配置
+	DefaultWindowSize yamlByteSize `yaml:"defaultWindowSize" json:"defaultWindowSize"` // 默认窗口大小
+	MinWindowSize     yamlByteSize `yaml:"minWindowSize" json:"minWindowSize"`         // 最小窗口大小
+	MaxWindowSize     yamlByteSize `yaml:"maxWindowSize" json:"maxWindowSize"`         // 最大窗口大小
+	WindowTimeout     yamlDuration `yaml:"windowTimeout" json:"windowTimeout"`         // 窗口等待超时
+
+	// 拥塞控制配置
+	CongestionControlInterval yamlDuration `yaml:"congestionControlInterval" json:"congestionControlInterval"` // 拥塞控制检查间隔
 }
 
 // GetConnectionTTL 返回连接 TTL 的 time.Duration 值
@@ -278,6 +385,31 @@ func (c *Config) GetDynamicPoolInterval() time.Duration {
 	return c.DynamicPoolInterval.Duration
 }
 
+// GetDefaultWindowSize 返回默认窗口大小的字节数
+func (c *Config) GetDefaultWindowSize() int64 {
+	return c.DefaultWindowSize.Bytes
+}
+
+// GetMinWindowSize 返回最小窗口大小的字节数
+func (c *Config) GetMinWindowSize() int64 {
+	return c.MinWindowSize.Bytes
+}
+
+// GetMaxWindowSize 返回最大窗口大小的字节数
+func (c *Config) GetMaxWindowSize() int64 {
+	return c.MaxWindowSize.Bytes
+}
+
+// GetWindowTimeout 返回窗口超时的 time.Duration 值
+func (c *Config) GetWindowTimeout() time.Duration {
+	return c.WindowTimeout.Duration
+}
+
+// GetCongestionControlInterval 返回拥塞控制间隔的 time.Duration 值
+func (c *Config) GetCongestionControlInterval() time.Duration {
+	return c.CongestionControlInterval.Duration
+}
+
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
@@ -358,5 +490,14 @@ func DefaultConfig() *Config {
 		// 多路复用配置
 		EnableMultiplex:         true,
 		MaxStreamsPerConnection: 5,
+
+		// 窗口流控配置
+		DefaultWindowSize: yamlByteSize{256 * 1024},      // 256KB
+		MinWindowSize:     yamlByteSize{32 * 1024},       // 32KB
+		MaxWindowSize:     yamlByteSize{1024 * 1024},     // 1MB
+		WindowTimeout:     yamlDuration{5 * time.Second}, // 5秒
+
+		// 拥塞控制配置
+		CongestionControlInterval: yamlDuration{time.Minute}, // 60秒
 	}
 }

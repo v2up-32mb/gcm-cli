@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -183,6 +184,40 @@ func DefineFlags() []cli.Flag {
 			OnlyOnce: true,
 		},
 
+		// ===== 窗口流控配置 =====
+		&cli.StringFlag{
+			Name:     "default-window-size",
+			Usage:    "默认窗口大小 (如 256KB, 1MB)",
+			Value:    "256KB",
+			OnlyOnce: true,
+		},
+		&cli.StringFlag{
+			Name:     "min-window-size",
+			Usage:    "最小窗口大小 (如 32KB)",
+			Value:    "32KB",
+			OnlyOnce: true,
+		},
+		&cli.StringFlag{
+			Name:     "max-window-size",
+			Usage:    "最大窗口大小 (如 1MB)",
+			Value:    "1MB",
+			OnlyOnce: true,
+		},
+		&cli.DurationFlag{
+			Name:     "window-timeout",
+			Usage:    "窗口等待超时时间",
+			Value:    5 * time.Second,
+			OnlyOnce: true,
+		},
+
+		// ===== 拥塞控制配置 =====
+		&cli.DurationFlag{
+			Name:     "congestion-control-interval",
+			Usage:    "拥塞控制检查间隔",
+			Value:    time.Minute,
+			OnlyOnce: true,
+		},
+
 		// ===== ECH 配置 =====
 		&cli.BoolFlag{
 			Name:     "enable-ech",
@@ -299,6 +334,37 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	}
 	if cmd.IsSet("relay-max-latency") {
 		cfg.RelayMaxLatency = yamlDuration{cmd.Duration("relay-max-latency")}
+	}
+
+	// ===== 窗口流控配置 =====
+	if cmd.IsSet("default-window-size") {
+		bytes, err := parseByteSize(cmd.String("default-window-size"))
+		if err != nil {
+			return fmt.Errorf("无效的默认窗口大小: %w", err)
+		}
+		cfg.DefaultWindowSize = yamlByteSize{bytes}
+	}
+	if cmd.IsSet("min-window-size") {
+		bytes, err := parseByteSize(cmd.String("min-window-size"))
+		if err != nil {
+			return fmt.Errorf("无效的最小窗口大小: %w", err)
+		}
+		cfg.MinWindowSize = yamlByteSize{bytes}
+	}
+	if cmd.IsSet("max-window-size") {
+		bytes, err := parseByteSize(cmd.String("max-window-size"))
+		if err != nil {
+			return fmt.Errorf("无效的最大窗口大小: %w", err)
+		}
+		cfg.MaxWindowSize = yamlByteSize{bytes}
+	}
+	if cmd.IsSet("window-timeout") {
+		cfg.WindowTimeout = yamlDuration{cmd.Duration("window-timeout")}
+	}
+
+	// ===== 拥塞控制配置 =====
+	if cmd.IsSet("congestion-control-interval") {
+		cfg.CongestionControlInterval = yamlDuration{cmd.Duration("congestion-control-interval")}
 	}
 
 	// ===== ECH 配置 =====

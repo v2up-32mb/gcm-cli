@@ -495,7 +495,14 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	// 初始化 StreamManager（messageLoop 需要它来分发消息）
 	// 所有连接都必须在 managerByConn 中，无论是否有活跃的 stream
 	p.mu.Lock()
-	p.managerByConn[item] = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+	p.managerByConn[item] = NewStreamManager(
+		item,
+		int(p.cfg.MaxStreamsPerConnection),
+		p.cfg.GetDefaultWindowSize(),
+		p.cfg.GetMinWindowSize(),
+		p.cfg.GetMaxWindowSize(),
+		p.cfg.GetWindowTimeout(),
+	)
 	p.mu.Unlock()
 
 	// 启动消息处理循环
@@ -646,7 +653,14 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	// 初始化 StreamManager（确保 messageLoop 能立即分发消息）
 	p.mu.Lock()
-	p.managerByConn[item] = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+	p.managerByConn[item] = NewStreamManager(
+		item,
+		int(p.cfg.MaxStreamsPerConnection),
+		p.cfg.GetDefaultWindowSize(),
+		p.cfg.GetMinWindowSize(),
+		p.cfg.GetMaxWindowSize(),
+		p.cfg.GetWindowTimeout(),
+	)
 	p.mu.Unlock()
 
 	// 启动消息处理循环
@@ -788,7 +802,14 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 				// 获取或创建 StreamManager
 				mgr, ok := p.managerByConn[item]
 				if !ok {
-					mgr = NewStreamManager(item, maxStreams)
+					mgr = NewStreamManager(
+						item,
+						maxStreams,
+						p.cfg.GetDefaultWindowSize(),
+						p.cfg.GetMinWindowSize(),
+						p.cfg.GetMaxWindowSize(),
+						p.cfg.GetWindowTimeout(),
+					)
 					p.managerByConn[item] = mgr
 				}
 
@@ -1096,7 +1117,14 @@ func (p *ConnectionPool) RegisterStreamHandler(item *ConnItem, streamID byte, ha
 	// 获取或创建 StreamManager
 	mgr, ok := p.managerByConn[item]
 	if !ok {
-		mgr = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+		mgr = NewStreamManager(
+			item,
+			int(p.cfg.MaxStreamsPerConnection),
+			p.cfg.GetDefaultWindowSize(),
+			p.cfg.GetMinWindowSize(),
+			p.cfg.GetMaxWindowSize(),
+			p.cfg.GetWindowTimeout(),
+		)
 		p.managerByConn[item] = mgr
 	}
 
@@ -1123,7 +1151,14 @@ func (p *ConnectionPool) AllocateStreamID(item *ConnItem, targetAddr string, tim
 	// 获取或创建 StreamManager
 	mgr, ok := p.managerByConn[item]
 	if !ok {
-		mgr = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+		mgr = NewStreamManager(
+			item,
+			int(p.cfg.MaxStreamsPerConnection),
+			p.cfg.GetDefaultWindowSize(),
+			p.cfg.GetMinWindowSize(),
+			p.cfg.GetMaxWindowSize(),
+			p.cfg.GetWindowTimeout(),
+		)
 		p.managerByConn[item] = mgr
 	}
 	p.mu.Unlock()
@@ -1776,7 +1811,7 @@ func (p *ConnectionPool) GetStream(conn *ConnItem, streamID byte) *Stream {
 
 // congestionControlLoop 拥塞控制循环
 func (p *ConnectionPool) congestionControlLoop() {
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(p.cfg.GetCongestionControlInterval())
 	defer ticker.Stop()
 
 	for {
