@@ -2,7 +2,7 @@ package pool
 
 import (
 	"context"
-	"encoding/binary"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"net/http"
@@ -125,10 +125,6 @@ type ConnectionPool struct {
 
 	stats    PoolStats
 	stopChan chan struct{}
-
-	// 用于生成 WS ID
-	wsIDCounter   uint32
-	wsIDCounterMu sync.Mutex
 }
 
 // connRequest 连接请求
@@ -288,13 +284,9 @@ func (p *ConnectionPool) initializeRelay() {
 
 // generateWSID 生成 WebSocket ID (3字节)
 func (p *ConnectionPool) generateWSID() []byte {
-	p.wsIDCounterMu.Lock()
-	defer p.wsIDCounterMu.Unlock()
-
-	p.wsIDCounter++
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, p.wsIDCounter)
-	return buf[1:4] // 取后 3 字节
+	buf := make([]byte, 3)
+	rand.Read(buf)
+	return buf
 }
 
 // createConnectionSync 同步创建连接（用于预热），返回成功/失败
