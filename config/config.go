@@ -122,7 +122,7 @@ type Config struct {
 	// 基本配置
 	WorkerHost    string   `yaml:"workerHost" json:"workerHost"`
 	ListenAddress string   `yaml:"listenAddress" json:"listenAddress"` // 监听地址，如 ":10080" 或 "0.0.0.0:10080"
-	ProxyToken    string   `yaml:"proxyToken,omitempty" json:"proxyToken,omitempty"`
+	UserID        string   `yaml:"userID,omitempty" json:"userID,omitempty"`
 	LogLevel      LogLevel `yaml:"logLevel" json:"logLevel"`
 
 	// 连接池配置
@@ -132,21 +132,21 @@ type Config struct {
 	ConnectionTimeout yamlDuration `yaml:"connectionTimeout" json:"connectionTimeout"`
 
 	// 中转节点配置
-	RelayIPs                  []string    `yaml:"relayIPs" json:"relayIPs"`
+	RelayIPs                  []string     `yaml:"relayIPs" json:"relayIPs"`
 	RelayMonitorInterval      yamlDuration `yaml:"relayMonitorInterval" json:"relayMonitorInterval"`
 	RelayMaxLatency           yamlDuration `yaml:"relayMaxLatency" json:"relayMaxLatency"`
-	RelayFailureThreshold     int         `yaml:"relayFailureThreshold" json:"relayFailureThreshold"`
+	RelayFailureThreshold     int          `yaml:"relayFailureThreshold" json:"relayFailureThreshold"`
 	RelayRescoreInterval      yamlDuration `yaml:"relayRescoreInterval" json:"relayRescoreInterval"`
 	RelayForceRescoreCooldown yamlDuration `yaml:"relayForceRescoreCooldown" json:"relayForceRescoreCooldown"`
 
 	// DNS 缓存配置
-	EnableDoH               bool     `yaml:"enableDoH" json:"enableDoH"`
-	DoHUrl                  string   `yaml:"dohUrl" json:"dohUrl"`
+	EnableDoH               bool         `yaml:"enableDoH" json:"enableDoH"`
+	DoHUrl                  string       `yaml:"dohUrl" json:"dohUrl"`
 	DNSCacheTTL             yamlDuration `yaml:"dnsCacheTTL" json:"dnsCacheTTL"`
 	DNSCacheCleanupInterval yamlDuration `yaml:"dnsCacheCleanupInterval" json:"dnsCacheCleanupInterval"`
-	EnableDNSWarmup         bool     `yaml:"enableDNSWarmup" json:"enableDNSWarmup"`
-	DNSWarmupDomains        []string `yaml:"dnsWarmupDomains" json:"dnsWarmupDomains"`
-	EnableDoHProxy          bool     `yaml:"enableDoHProxy" json:"enableDoHProxy"`
+	EnableDNSWarmup         bool         `yaml:"enableDNSWarmup" json:"enableDNSWarmup"`
+	DNSWarmupDomains        []string     `yaml:"dnsWarmupDomains" json:"dnsWarmupDomains"`
+	EnableDoHProxy          bool         `yaml:"enableDoHProxy" json:"enableDoHProxy"`
 
 	// 心跳保活配置
 	HeartbeatInterval yamlDuration `yaml:"heartbeatInterval" json:"heartbeatInterval"`
@@ -268,7 +268,7 @@ func DefaultConfig() *Config {
 		// 基本配置
 		WorkerHost:    "", // 必须通过参数或配置文件指定
 		ListenAddress: ":10080",
-		ProxyToken:    "",
+		UserID:        "",
 		LogLevel:      INFO,
 
 		// 连接池配置

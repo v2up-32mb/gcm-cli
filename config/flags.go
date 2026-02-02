@@ -30,14 +30,14 @@ func DefineFlags() []cli.Flag {
 			Value:   ":10080",
 		},
 		&cli.StringFlag{
-			Name:    "token",
-			Aliases: []string{"t"},
-			Usage:   "代理访问令牌",
+			Name:    "user-id",
+			Aliases: []string{"u"},
+			Usage:   "用户鉴权ID",
 		},
 		&cli.StringFlag{
-			Name:    "log-level",
-			Usage:   "日志级别: DEBUG/INFO/WARN/ERROR",
-			Value:   "INFO",
+			Name:  "log-level",
+			Usage: "日志级别: DEBUG/INFO/WARN/ERROR",
+			Value: "INFO",
 		},
 
 		// ===== DNS 配置 =====
@@ -169,8 +169,8 @@ func ApplyFlags(cfg *Config, ctx *cli.Context) error {
 	if ctx.IsSet("listen") {
 		cfg.ListenAddress = ctx.String("listen")
 	}
-	if ctx.IsSet("token") {
-		cfg.ProxyToken = ctx.String("token")
+	if ctx.IsSet("user-id") {
+		cfg.UserID = ctx.String("user-id")
 	}
 	if ctx.IsSet("log-level") {
 		cfg.LogLevel = ParseLogLevel(ctx.String("log-level"))
