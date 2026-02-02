@@ -305,9 +305,6 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	if cmd.IsSet("enable-ech") {
 		cfg.EnableECH = cmd.Bool("enable-ech")
 	}
-	if cmd.IsSet("ech-domain") {
-		cfg.ECHDomain = cmd.String("ech-domain")
-	}
 
 	return nil
 }

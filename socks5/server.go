@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/dns"
-	"github.com/gcm/gcm/logger"
-	"github.com/gcm/gcm/pool"
-	"github.com/gcm/gcm/protocol"
+	"gcm/config"
+	"gcm/dns"
+	"gcm/logger"
+	"gcm/pool"
+	"gcm/protocol"
 	"github.com/gorilla/websocket"
 )
 

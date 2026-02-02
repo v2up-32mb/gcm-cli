@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/logger"
+	"gcm/config"
+	"gcm/logger"
 	"golang.org/x/net/dns/dnsmessage"
 )
 

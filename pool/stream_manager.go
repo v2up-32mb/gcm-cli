@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gcm/gcm/logger"
-	"github.com/gcm/gcm/protocol"
+	"gcm/logger"
+	"gcm/protocol"
 )
 
 // Stream 表示单个流的状态

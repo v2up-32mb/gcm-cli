@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,12 +13,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/logger"
-	"github.com/gcm/gcm/protocol"
-	"github.com/gcm/gcm/relay"
+	"gcm/config"
+	"gcm/logger"
+	"gcm/protocol"
+	"gcm/relay"
 	"github.com/gorilla/websocket"
 )
+
+// EchManagerInterface ECH 管理器接口
+type EchManagerInterface interface {
+	GetTlsConfig(domain string, useEch bool) (*tls.Config, error)
+}
 
 // ConnItem 连接项
 type ConnItem struct {
@@ -107,6 +113,7 @@ type ConnectionPool struct {
 	cfg          *config.Config
 	log          *logger.Logger
 	relayManager *relay.RelayManager
+	echManager   EchManagerInterface // ECH 配置管理器
 
 	pool               []*ConnItem
 	activeConnections  int32
@@ -150,11 +157,12 @@ type PoolStats struct {
 }
 
 // NewConnectionPool 创建连接池
-func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager) *ConnectionPool {
+func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr EchManagerInterface) *ConnectionPool {
 	p := &ConnectionPool{
 		cfg:                cfg,
 		log:                logger.GetLogger("Pool"),
 		relayManager:       relayMgr,
+		echManager:         echMgr,
 		pool:               make([]*ConnItem, 0),
 		requestQueue:       make(chan *connRequest, cfg.MaxPoolSize*2),
 		managerByConn:      make(map[*ConnItem]*StreamManager),
@@ -289,6 +297,25 @@ func (p *ConnectionPool) generateWSID() []byte {
 	return buf
 }
 
+// getTLSConfig 获取 TLS 配置（支持 ECH）
+func (p *ConnectionPool) getTLSConfig() *tls.Config {
+	if p.echManager != nil {
+		tlsConfig, err := p.echManager.GetTlsConfig(p.cfg.WorkerHost, p.cfg.EnableECH)
+		if err != nil {
+			p.log.Warn("获取 TLS 配置失败，使用默认配置: %v", err)
+			return &tls.Config{
+				MinVersion: tls.VersionTLS13,
+				ServerName: p.cfg.WorkerHost,
+			}
+		}
+		return tlsConfig
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		ServerName: p.cfg.WorkerHost,
+	}
+}
+
 // createConnectionSync 同步创建连接（用于预热），返回成功/失败
 func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	// 双重检查
@@ -337,10 +364,14 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	headers.Set("Host", p.cfg.WorkerHost)
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
 
+	// 获取 TLS 配置（支持 ECH）
+	tlsConfig := p.getTLSConfig()
+
 	// 配置 WebSocket Dialer
 	dialer := websocket.Dialer{
 		HandshakeTimeout: p.cfg.GetConnectionTimeout(),
-		NetDial:          customDial, // 使用自定义拨号函数（中转时替换目标 IP）
+		NetDial:          customDial,
+		TLSClientConfig:  tlsConfig,
 	}
 
 	startTime := time.Now()
@@ -451,10 +482,14 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 	headers.Set("Host", p.cfg.WorkerHost)
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
 
+	// 获取 TLS 配置（支持 ECH）
+	tlsConfig := p.getTLSConfig()
+
 	// 配置 WebSocket Dialer
 	dialer := websocket.Dialer{
 		HandshakeTimeout: p.cfg.GetConnectionTimeout(),
-		NetDial:          customDial, // 使用自定义拨号函数（中转时替换目标 IP）
+		NetDial:          customDial,
+		TLSClientConfig:  tlsConfig,
 	}
 
 	// 使用 channel 和 goroutine 实现可靠的超时保护

@@ -1,4 +1,4 @@
-module github.com/gcm/gcm
+module gcm
 
 go 1.22
 

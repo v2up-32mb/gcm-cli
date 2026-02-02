@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/dns"
-	"github.com/gcm/gcm/logger"
-	"github.com/gcm/gcm/pool"
-	"github.com/gcm/gcm/relay"
+	"gcm/config"
+	"gcm/dns"
+	"gcm/logger"
+	"gcm/pool"
+	"gcm/relay"
 )
 
 // Server Metrics 服务器

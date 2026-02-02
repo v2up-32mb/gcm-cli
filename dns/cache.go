@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/logger"
+	"gcm/config"
+	"gcm/logger"
 )
 
 // CacheEntry 缓存条目

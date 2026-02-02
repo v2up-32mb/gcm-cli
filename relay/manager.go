@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/dns"
-	"github.com/gcm/gcm/logger"
+	"gcm/config"
+	"gcm/dns"
+	"gcm/logger"
 )
 
 // RelayNode 中转节点

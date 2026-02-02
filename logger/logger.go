@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gcm/gcm/config"
+	"gcm/config"
 )
 
 // Logger 日志器

@@ -148,6 +148,11 @@ type Config struct {
 	DNSWarmupDomains        []string     `yaml:"dnsWarmupDomains" json:"dnsWarmupDomains"`
 	EnableDoHProxy          bool         `yaml:"enableDoHProxy" json:"enableDoHProxy"`
 
+	// ECH 配置
+	EnableECH          bool         `yaml:"enableECH" json:"enableECH"`
+	ECHCacheTTL        yamlDuration `yaml:"echCacheTTL" json:"echCacheTTL"`
+	ECHRefreshInterval yamlDuration `yaml:"echRefreshInterval" json:"echRefreshInterval"`
+
 	// 心跳保活配置
 	HeartbeatInterval yamlDuration `yaml:"heartbeatInterval" json:"heartbeatInterval"`
 	HeartbeatTimeout  yamlDuration `yaml:"heartbeatTimeout" json:"heartbeatTimeout"`
@@ -190,10 +195,6 @@ type Config struct {
 	// 多路复用配置
 	EnableMultiplex         bool `yaml:"enableMultiplex" json:"enableMultiplex"`
 	MaxStreamsPerConnection int  `yaml:"maxStreamsPerConnection" json:"maxStreamsPerConnection"`
-
-	// ECH 配置
-	EnableECH bool   `yaml:"enableECH" json:"enableECH"`
-	ECHDomain string `yaml:"echDomain" json:"echDomain"`
 }
 
 // GetConnectionTTL 返回连接 TTL 的 time.Duration 值
@@ -234,6 +235,16 @@ func (c *Config) GetDNSCacheTTL() time.Duration {
 // GetDNSCacheCleanupInterval 返回 DNS 缓存清理间隔的 time.Duration 值
 func (c *Config) GetDNSCacheCleanupInterval() time.Duration {
 	return c.DNSCacheCleanupInterval.Duration
+}
+
+// GetECHCacheTTL 返回 ECH 缓存 TTL 的 time.Duration 值
+func (c *Config) GetECHCacheTTL() time.Duration {
+	return c.ECHCacheTTL.Duration
+}
+
+// GetECHRefreshInterval 返回 ECH 刷新间隔的 time.Duration 值
+func (c *Config) GetECHRefreshInterval() time.Duration {
+	return c.ECHRefreshInterval.Duration
 }
 
 // GetHeartbeatInterval 返回心跳间隔的 time.Duration 值
@@ -297,6 +308,11 @@ func DefaultConfig() *Config {
 		EnableDNSWarmup:         false,
 		DNSWarmupDomains:        []string{},
 		EnableDoHProxy:          false,
+
+		// ECH 配置
+		EnableECH:          false,
+		ECHCacheTTL:        yamlDuration{24 * time.Hour},
+		ECHRefreshInterval: yamlDuration{12 * time.Hour},
 
 		// 心跳保活配置
 		HeartbeatInterval: yamlDuration{15 * time.Second},

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gcm/gcm/protocol"
+	"gcm/protocol"
 	"github.com/gorilla/websocket"
 )
 

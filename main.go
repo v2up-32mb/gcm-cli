@@ -10,13 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gcm/gcm/config"
-	"github.com/gcm/gcm/dns"
-	"github.com/gcm/gcm/logger"
-	"github.com/gcm/gcm/metrics"
-	"github.com/gcm/gcm/pool"
-	"github.com/gcm/gcm/relay"
-	"github.com/gcm/gcm/socks5"
+	"gcm/config"
+	"gcm/dns"
+	"gcm/ech"
+	"gcm/logger"
+	"gcm/metrics"
+	"gcm/pool"
+	"gcm/relay"
+	"gcm/socks5"
 )
 
 // websocketLogger 过滤 websocket 库的冗余日志
@@ -37,6 +38,7 @@ var (
 	relayManager *relay.RelayManager
 	dnsCache     *dns.DNSCache
 	dohClient    *dns.DoHClient
+	echManager   *ech.EchManager
 	connPool     *pool.ConnectionPool
 	socks5Server *socks5.Server
 	metricsSrv   *metrics.Server
@@ -75,9 +77,20 @@ func main() {
 	}
 	defer relayManager.Close()
 
+	// 初始化 ECH 管理器（如果启用）
+	if cfg.EnableECH {
+		log.Info("正在初始化 ECH 管理器...")
+		echManager = ech.NewEchManager(
+			dohClient,
+			cfg.GetECHCacheTTL(),
+			cfg.GetECHRefreshInterval(),
+		)
+		log.Debug("ECH 管理器初始化完成")
+	}
+
 	// 初始化连接池
 	log.Info("正在初始化连接池...")
-	connPool = pool.NewConnectionPool(cfg, relayManager)
+	connPool = pool.NewConnectionPool(cfg, relayManager, echManager)
 	defer connPool.Close()
 	log.Debug("连接池初始化完成")
 
@@ -144,6 +157,14 @@ func main() {
 		}
 	}
 
+	// 启动 ECH 定时刷新任务（如果启用）
+	if cfg.EnableECH && echManager != nil {
+		log.Info("正在启动 ECH 定时刷新任务...")
+		echManager.StartAutoRefresh()
+		defer echManager.StopAutoRefresh()
+		log.Debug("ECH 定时刷新任务已启动")
+	}
+
 	printReadyInfo(log)
 
 	// 等待信号
@@ -157,6 +178,7 @@ func printStartupInfo(log *logger.Logger) {
 	log.Info("Worker: %s", cfg.WorkerHost)
 	log.Info("监听地址: %s", cfg.ListenAddress)
 	log.Info("DoH: %v (%s)", cfg.EnableDoH, cfg.DoHUrl)
+	log.Info("ECH: %v", cfg.EnableECH)
 	log.Info("连接池: Min=%d, Max=%d", cfg.MinPoolSize, cfg.MaxPoolSize)
 	log.Info("DNS缓存TTL: %d秒", int(cfg.GetDNSCacheTTL().Seconds()))
 	log.Info("日志级别: %s", cfg.LogLevel)
