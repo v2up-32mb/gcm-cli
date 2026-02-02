@@ -1,0 +1,90 @@
+# 工作节点地址
+workerHost: "gcm.ics.de5.net"
+# 本地监听端口
+localPort: 30007
+# 用户标识
+userId: "v2up"
+# 连接池最小数量
+minPoolSize: 2
+# 连接池最大数量
+maxPoolSize: 16
+# 连接存活时间（毫秒）
+connectionTTL: 300000
+# 中继服务器地址列表
+relayIPs:
+  - "saas.sin.fan"
+  - "mfa.gov.ua"
+  - "gcm.cloudflare.182682.xyz"
+  - "cf.0sm.com"
+# 代理服务器地址（留空表示不使用）
+proxyIP: ""
+# 是否启用 DNS over HTTPS
+enableDoH: true
+# DoH 服务地址
+dohUrl: "https://v.recipes/dns-query"
+# 连接超时时间（毫秒）
+connectionTimeout: 5000
+# DNS 缓存存活时间（毫秒）
+dnsCacheTTL: 300000
+# DNS 缓存清理间隔（毫秒）
+dnsCacheCleanupInterval: 60000
+# 中继监控间隔（毫秒）
+relayMonitorInterval: 30000
+# 中继最大延迟（毫秒）
+relayMaxLatency: 1000
+# 中继失败次数阈值
+relayFailureThreshold: 3
+# 中继重新评分间隔（毫秒）
+relayRescoreInterval: 300000
+# 心跳发送间隔（毫秒）
+heartbeatInterval: 15000
+# 心跳超时时间（毫秒）
+heartbeatTimeout: 5000
+# 是否启用 TCP_NODELAY（禁用 Nagle 算法）
+enableTcpNoDelay: true
+# 日志级别
+logLevel: "INFO"
+# 是否启用指标采集
+enableMetrics: true
+# 指标服务端口
+metricsPort: 9090
+# 是否启用连接池预热
+enablePoolWarmup: true
+# 预热并发数
+warmupConcurrency: 10
+# 预热超时时间（毫秒）
+warmupTimeout: 30000
+# 是否启用自动重连
+enableAutoReconnect: true
+# 最大重连尝试次数
+maxReconnectAttempts: 3
+# 重连延迟（毫秒）
+reconnectDelay: 1000
+# 隧道超时时间（毫秒）
+tunnelTimeout: 60000
+# 是否启用动态连接池
+enableDynamicPool: true
+# 动态池调整间隔（毫秒）
+dynamicPoolInterval: 60000
+# 动态池最小数量
+dynamicPoolMinSize: 3
+# 动态池最大数量
+dynamicPoolMaxSize: 100
+# 动态池低负载阈值（百分比）
+dynamicPoolLowThreshold: 0.3
+# 动态池高负载阈值（百分比）
+dynamicPoolHighThreshold: 0.8
+# 是否启用日志文件
+enableLogFile: false
+# 日志文件路径
+logFilePath: "gcm.log"
+# 日志文件最大大小（字节）
+logFileMaxSize: 10485760
+# 日志文件备份数量
+logFileBackupCount: 3
+# 是否启用统计
+enableStats: true
+# 是否启用多路复用
+enableMultiplex: true
+# 每条连接的最大流数量
+maxStreamsPerConnection: 5

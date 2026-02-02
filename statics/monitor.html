@@ -134,6 +134,10 @@
                 <h3 class="text-lg font-semibold mb-4 text-gray-200">🔍 DNS 缓存</h3>
                 <div class="space-y-3">
                     <div class="flex justify-between">
+                        <span class="text-gray-400">总请求数</span>
+                        <span id="dns_requests" class="text-yellow-400 font-mono">--</span>
+                    </div>
+                    <div class="flex justify-between">
                         <span class="text-gray-400">缓存条目数</span>
                         <span id="dns_cache_size" class="text-blue-400 font-mono">--</span>
                     </div>
@@ -416,6 +420,7 @@
             latencyChart.update();
 
             // DNS
+            document.getElementById('dns_requests').textContent = metrics.gcm_dns_requests_total ?? '--';
             document.getElementById('dns_cache_size').textContent = metrics.gcm_dns_cache_size ?? '--';
             document.getElementById('dns_hits').textContent = metrics.gcm_dns_cache_hits_total ?? '--';
             document.getElementById('dns_misses').textContent = metrics.gcm_dns_cache_misses_total ?? '--';
