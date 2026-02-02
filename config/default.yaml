@@ -81,3 +81,7 @@ enableStats: true               # 是否启用统计增强
 # ===== 多路复用配置 =====
 enableMultiplex: true           # 是否启用多路复用（需 Worker 端配合）
 maxStreamsPerConnection: 5      # 每个连接最大并发流数
+
+# ===== ECH 配置 =====
+enableECH: false                # 是否启用 TLS ECH (Encrypted Client Hello)
+echDomain: "cloudflare-ech.com" # ECH 隐藏域名

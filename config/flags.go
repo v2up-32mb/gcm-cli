@@ -182,6 +182,20 @@ func DefineFlags() []cli.Flag {
 			Value:    500 * time.Millisecond,
 			OnlyOnce: true,
 		},
+
+		// ===== ECH 配置 =====
+		&cli.BoolFlag{
+			Name:     "enable-ech",
+			Aliases:  []string{"e"},
+			Usage:    "启用 TLS ECH (Encrypted Client Hello)",
+			OnlyOnce: true,
+		},
+		&cli.StringFlag{
+			Name:     "ech-domain",
+			Usage:    "ECH 隐藏域名",
+			Value:    "cloudflare-ech.com",
+			OnlyOnce: true,
+		},
 	}
 }
 
@@ -285,6 +299,14 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	}
 	if cmd.IsSet("relay-max-latency") {
 		cfg.RelayMaxLatency = yamlDuration{cmd.Duration("relay-max-latency")}
+	}
+
+	// ===== ECH 配置 =====
+	if cmd.IsSet("enable-ech") {
+		cfg.EnableECH = cmd.Bool("enable-ech")
+	}
+	if cmd.IsSet("ech-domain") {
+		cfg.ECHDomain = cmd.String("ech-domain")
 	}
 
 	return nil

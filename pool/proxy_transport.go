@@ -37,12 +37,12 @@ type tunnelConn struct {
 // newTunnelConn 创建隧道连接
 func newTunnelConn(connItem *ConnItem, streamID byte, target string) *tunnelConn {
 	return &tunnelConn{
-		connItem:  connItem,
-		streamID:  streamID,
-		target:    target,
-		readChan:  make(chan []byte, 100), // 缓冲区
-		closeChan: make(chan struct{}),
-		localAddr: &tunnelAddr{net: "tcp", addr: "127.0.0.1:0"},
+		connItem:   connItem,
+		streamID:   streamID,
+		target:     target,
+		readChan:   make(chan []byte, 100), // 缓冲区
+		closeChan:  make(chan struct{}),
+		localAddr:  &tunnelAddr{net: "tcp", addr: "127.0.0.1:0"},
 		remoteAddr: &tunnelAddr{net: "tcp", addr: target},
 	}
 }
@@ -188,7 +188,7 @@ func (t *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	connectedChan := make(chan struct{}, 1)
 	dataChan := make(chan []byte, 100) // DATA 消息缓冲
 	closeChan := make(chan struct{}, 1)
-	streamRegistered := true            // 标记 Stream 是否需要清理
+	streamRegistered := true // 标记 Stream 是否需要清理
 
 	handler := &StreamHandler{
 		OnMessage: func(msg *protocol.Message) {

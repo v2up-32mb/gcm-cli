@@ -190,6 +190,10 @@ type Config struct {
 	// 多路复用配置
 	EnableMultiplex         bool `yaml:"enableMultiplex" json:"enableMultiplex"`
 	MaxStreamsPerConnection int  `yaml:"maxStreamsPerConnection" json:"maxStreamsPerConnection"`
+
+	// ECH 配置
+	EnableECH bool   `yaml:"enableECH" json:"enableECH"`
+	ECHDomain string `yaml:"echDomain" json:"echDomain"`
 }
 
 // GetConnectionTTL 返回连接 TTL 的 time.Duration 值

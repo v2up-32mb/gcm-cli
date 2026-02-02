@@ -23,11 +23,11 @@ type Stream struct {
 // StreamManager 管理单个 WebSocket 连接上的所有 stream
 // 每条 WebSocket 连接对应一个 StreamManager
 type StreamManager struct {
-	conn    *ConnItem           // 所属的连接
-	max     int                 // 最大 stream 数量
-	streams map[byte]*Stream    // Stream ID -> Stream
-	mu      sync.RWMutex        // 保护 streams 映射
-	log     *logger.Logger      // 日志器
+	conn    *ConnItem        // 所属的连接
+	max     int              // 最大 stream 数量
+	streams map[byte]*Stream // Stream ID -> Stream
+	mu      sync.RWMutex     // 保护 streams 映射
+	log     *logger.Logger   // 日志器
 }
 
 // NewStreamManager 创建新的 StreamManager
@@ -66,7 +66,7 @@ func (sm *StreamManager) tryAllocateStream(targetAddr string) (byte, bool) {
 			}
 			sm.conn.mu.Lock()
 			sm.conn.Streams++
-			sm.conn.Traffic.IncStream()  // 同步增加流量计数器
+			sm.conn.Traffic.IncStream() // 同步增加流量计数器
 			sm.conn.mu.Unlock()
 
 			sm.log.Debug("连接 [%s] 分配 Stream[%02x] -> %s",
@@ -86,7 +86,7 @@ func (sm *StreamManager) tryAllocateStream(targetAddr string) (byte, bool) {
 			}
 			sm.conn.mu.Lock()
 			sm.conn.Streams++
-			sm.conn.Traffic.IncStream()  // 同步增加流量计数器
+			sm.conn.Traffic.IncStream() // 同步增加流量计数器
 			sm.conn.mu.Unlock()
 
 			sm.log.Debug("连接 [%s] 分配 Stream[%02x] (扫描) -> %s",

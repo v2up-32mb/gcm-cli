@@ -57,9 +57,9 @@ func (s *Server) Start() error {
 	s.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", s.cfg.MetricsPort),
 		Handler:      mux,
-		ReadTimeout:  10 * time.Second,  // 读取请求超时
-		WriteTimeout: 30 * time.Second,  // 写入响应超时（metrics可能较大）
-		IdleTimeout:  60 * time.Second,  // 空闲连接超时
+		ReadTimeout:  10 * time.Second, // 读取请求超时
+		WriteTimeout: 30 * time.Second, // 写入响应超时（metrics可能较大）
+		IdleTimeout:  60 * time.Second, // 空闲连接超时
 	}
 
 	go func() {
