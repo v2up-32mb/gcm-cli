@@ -50,7 +50,7 @@ function parseCommandLineArgs() {
     logFilePath: null,
     tunnelTimeout: null,
     enableMultiplex: null,
-    userId: null,
+    userID: null,
     help: false,
   };
 
@@ -61,7 +61,7 @@ function parseCommandLineArgs() {
     switch (arg) {
       case "--user-id":
       case "-u":
-        parsed.userId = nextArg;
+        parsed.userID = nextArg;
         i++;
         break;
       case "--config":
@@ -215,7 +215,7 @@ GCM - Cloudflare Worker Proxy 客户端
 const DEFAULT_CONFIG = {
   workerHost: "",
   localPort: 1080,
-  userId: "gcm", // 用户ID，对应服务端的 USER_ID
+  userID: "gcm", // 用户ID，对应服务端的 USER_ID
   proxyIP: "", // 代理服务器IP，对应服务端的 PROXY_IP
   minPoolSize: 3, // 连接池最小数量
   maxPoolSize: 15, // 连接池最大数量
@@ -349,7 +349,7 @@ function loadConfig() {
   if (cliArgs.dohUrl) config.dohUrl = cliArgs.dohUrl;
   if (cliArgs.localPort) config.localPort = cliArgs.localPort;
   if (cliArgs.logLevel) config.logLevel = cliArgs.logLevel;
-  if (cliArgs.userId) config.userId = cliArgs.userId;
+  if (cliArgs.userID) config.userID = cliArgs.userID;
   if (cliArgs.minPoolSize !== null) config.minPoolSize = cliArgs.minPoolSize;
   if (cliArgs.maxPoolSize !== null) config.maxPoolSize = cliArgs.maxPoolSize;
   if (cliArgs.relayIPs) config.relayIPs = cliArgs.relayIPs;
@@ -376,6 +376,7 @@ function loadConfig() {
   const overrides = [];
   if (cliArgs.configFile) overrides.push(`config=${cliArgs.configFile}`);
   if (cliArgs.workerHost) overrides.push(`worker=${cliArgs.workerHost}`);
+  if (cliArgs.userID) overrides.push(`userID=${cliArgs.userID}`);
   if (cliArgs.dohUrl) overrides.push(`doh=${cliArgs.dohUrl}`);
   if (cliArgs.localPort) overrides.push(`port=${cliArgs.localPort}`);
   if (cliArgs.logLevel) overrides.push(`log-level=${cliArgs.logLevel}`);
@@ -1857,7 +1858,7 @@ class ConnectionPool extends EventEmitter {
       rejectUnauthorized: false,
     };
 
-    const path = `/${CONFIG.userId}`;
+    const path = `/${CONFIG.userID}`;
     // 如果配置了代理IP，添加到路径查询参数proxyip
     if (CONFIG.proxyIP) {
       path += `?proxyip=${CONFIG.proxyIP}`;

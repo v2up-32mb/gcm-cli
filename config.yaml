@@ -3,7 +3,7 @@ workerHost: "gcm.ics.de5.net"
 # 本地监听端口
 localPort: 30007
 # 用户标识
-userId: "v2up"
+userID: "v2up"
 # 连接池最小数量
 minPoolSize: 2
 # 连接池最大数量
