@@ -379,6 +379,27 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_relay_removed_nodes counter")
 	lines = append(lines, fmt.Sprintf("gcm_relay_removed_nodes %d", relayStats.Removed))
 
+	// 负载均衡指标 - 节点级别详细信息
+	s.log.Debug("[METRICS] 获取节点详细信息...")
+	detailedNodes := s.relayManager.GetDetailedNodes()
+
+	lines = append(lines, "# HELP gcm_relay_active_connections 节点当前活跃连接数")
+	lines = append(lines, "# TYPE gcm_relay_active_connections gauge")
+	lines = append(lines, "# HELP gcm_relay_total_connections 节点累计创建连接数")
+	lines = append(lines, "# TYPE gcm_relay_total_connections counter")
+	lines = append(lines, "# HELP gcm_relay_quality_score 节点平均质量评分(0-100)")
+	lines = append(lines, "# TYPE gcm_relay_quality_score gauge")
+	lines = append(lines, "# HELP gcm_relay_weight 节点动态权重")
+	lines = append(lines, "# TYPE gcm_relay_weight gauge")
+
+	for _, node := range detailedNodes {
+		relayLabel := fmt.Sprintf("%s:%d", node.IP, node.Port)
+		lines = append(lines, fmt.Sprintf(`gcm_relay_active_connections{relay="%s"} %d`, relayLabel, node.ActiveConnections))
+		lines = append(lines, fmt.Sprintf(`gcm_relay_total_connections{relay="%s"} %d`, relayLabel, node.TotalConnections))
+		lines = append(lines, fmt.Sprintf(`gcm_relay_quality_score{relay="%s"} %.2f`, relayLabel, node.AvgQualityScore))
+		lines = append(lines, fmt.Sprintf(`gcm_relay_weight{relay="%s"} %.2f`, relayLabel, node.Weight))
+	}
+
 	// 运行时间
 	lines = append(lines, "# HELP gcm_uptime_seconds 运行时间(秒)")
 	lines = append(lines, "# TYPE gcm_uptime_seconds gauge")

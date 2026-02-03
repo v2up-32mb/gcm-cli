@@ -200,7 +200,6 @@ type ConnectionPool struct {
 	// 目标地址亲和性映射 (用于多路复用优化)
 	targetToConn map[string]*ConnItem // 目标地址 -> 当前服务的连接
 
-	currentRelay       *relay.RelayNode
 	lastRelayFetchTime time.Time
 	currentMinPoolSize int32
 
@@ -351,23 +350,7 @@ func (p *ConnectionPool) Warmup() error {
 	elapsed := time.Since(startTime)
 	p.log.Info("预热完成，创建 %d 个连接 (失败: %d)，耗时 %dms", created, failed, elapsed.Milliseconds())
 
-	// 初始化中转节点
-	p.initializeRelay()
-
 	return nil
-}
-
-// initializeRelay 初始化当前使用的节点
-func (p *ConnectionPool) initializeRelay() {
-	p.currentRelay = p.relayManager.GetCurrentBest()
-	p.lastRelayFetchTime = time.Now()
-
-	if p.currentRelay != nil {
-		p.log.Info("当前中转节点: %s:%d (%dms)",
-			p.currentRelay.IP, p.currentRelay.Port, p.currentRelay.Latency.Milliseconds())
-	} else {
-		p.log.Warn("无可用的中转节点，将使用直连模式")
-	}
 }
 
 // generateWSID 生成 WebSocket ID (3字节)
@@ -475,11 +458,22 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	atomic.AddInt64(&p.stats.CreatedConnections, 1)
 
-	// 使用缓存的节点
-	if p.currentRelay == nil {
-		p.currentRelay = p.relayManager.GetCurrentBest()
+	// 使用负载均衡选择节点
+	relay := p.relayManager.GetNextRelayWithLoadBalance()
+	// loadIncremented 仅在当前 goroutine 中使用，无需原子操作
+	var loadIncremented bool
+	if relay != nil {
+		// 增加节点负载计数
+		p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, 1)
+		loadIncremented = true
+		defer func() {
+			// 只有在连接失败时才减少负载计数
+			// 成功时由连接关闭时处理
+			if loadIncremented {
+				p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, -1)
+			}
+		}()
 	}
-	relay := p.currentRelay
 
 	var url string
 	var headers http.Header
@@ -596,6 +590,9 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	p.pool = append(p.pool, item)
 	p.mu.Unlock()
 
+	// 连接成功，取消 defer 的负载减 1（由连接关闭时处理）
+	loadIncremented = false
+
 	return true
 }
 
@@ -614,11 +611,13 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	atomic.AddInt64(&p.stats.CreatedConnections, 1)
 
-	// 使用缓存的节点
-	if p.currentRelay == nil {
-		p.currentRelay = p.relayManager.GetCurrentBest()
+	// 使用负载均衡选择节点
+	relay := p.relayManager.GetNextRelayWithLoadBalance()
+	if relay != nil {
+		// 增加节点负载计数
+		p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, 1)
+		defer p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, -1)
 	}
-	relay := p.currentRelay
 
 	var url string
 	var headers http.Header
@@ -976,19 +975,9 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 
 // handleConnectionFailure 处理连接失败
 func (p *ConnectionPool) handleConnectionFailure() {
+	// 触发节点重新评分
 	if p.relayManager.ForceRescore() {
-		newRelay := p.relayManager.GetCurrentBest()
-		if newRelay != nil {
-			p.mu.Lock()
-			oldRelay := p.currentRelay
-			p.currentRelay = newRelay
-			p.mu.Unlock()
-
-			if oldRelay == nil || oldRelay.IP != newRelay.IP || oldRelay.Port != newRelay.Port {
-				p.log.Info("已切换中转节点: %s:%d -> %s:%d (%dms)",
-					oldRelay.IP, oldRelay.Port, newRelay.IP, newRelay.Port, newRelay.Latency.Milliseconds())
-			}
-		}
+		p.log.Info("节点重新评分完成，后续连接将使用负载均衡选择")
 	}
 }
 

@@ -1,13 +1,17 @@
 package pool
 
 import (
+	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"gcm/config"
 	"gcm/logger"
+	"gcm/relay"
 )
 
 // ConnectionQualityMonitor 连接质量监控器
@@ -118,7 +122,22 @@ func (m *ConnectionQualityMonitor) checkAllConnections() {
 		score := m.calculateQualityScore(conn)
 		atomic.StoreInt64(&conn.QualityScore, score)
 
-		// 检测劣化
+		// ✅ 新增：同步质量评分到 RelayManager（失败不影响后续劣化检测）
+		if conn.RelayAddr != "" {
+			host, portStr, err := net.SplitHostPort(conn.RelayAddr)
+			if err == nil {
+				port, err := strconv.Atoi(portStr)
+				if err == nil && port > 0 {
+					m.pool.relayManager.UpdateNodeQuality(host, port, float64(score))
+				} else {
+					m.log.Debug("端口解析失败: %s", portStr)
+				}
+			} else {
+				m.log.Debug("解析 RelayAddr 失败: %s", conn.RelayAddr)
+			}
+		}
+
+		// 检测劣化（始终执行，不受上面解析失败影响）
 		if score < m.degradeThreshold && !conn.IsDegraded {
 			conn.qualityMu.Lock()
 			conn.IsDegraded = true
@@ -175,10 +194,29 @@ func (m *ConnectionQualityMonitor) considerRelaySwitching() {
 
 // switchToNewRelay 切换到新节点
 func (m *ConnectionQualityMonitor) switchToNewRelay(oldRelayAddr string) {
-	// 1. 从 RelayManager 获取更优节点
-	newRelay := m.pool.relayManager.GetBestRelayExcluding(oldRelayAddr)
+	// 1. 使用负载均衡选择新节点（最多尝试 3 次避免选中旧节点）
+	var newRelay *relay.RelayNode
+	for i := 0; i < 3; i++ {
+		newRelay = m.pool.relayManager.GetNextRelayWithLoadBalance()
+		if newRelay == nil {
+			break
+		}
+		// 如果选中的不是旧节点，成功
+		if fmt.Sprintf("%s:%d", newRelay.IP, newRelay.Port) != oldRelayAddr {
+			break
+		}
+		// 否则继续尝试
+		newRelay = nil
+	}
+
 	if newRelay == nil {
 		m.log.Warn("没有可用的替代节点")
+		return
+	}
+
+	// 如果 3 次尝试后仍是旧节点，说明只有一个节点
+	if fmt.Sprintf("%s:%d", newRelay.IP, newRelay.Port) == oldRelayAddr {
+		m.log.Warn("无法找到不同的替代节点（可能只有一个节点）")
 		return
 	}
 
