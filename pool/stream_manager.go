@@ -527,7 +527,11 @@ func (s *Stream) RecordRTT(rtt time.Duration) {
 func (s *Stream) GetAverageRTT() time.Duration {
 	s.windowMu.Lock()
 	defer s.windowMu.Unlock()
+	return s.getAverageRTTLocked()
+}
 
+// getAverageRTTLocked 获取平均 RTT（调用者必须持有 windowMu 锁）
+func (s *Stream) getAverageRTTLocked() time.Duration {
 	var sum time.Duration
 	count := 0
 	for _, rtt := range s.rttHistory {
@@ -554,7 +558,7 @@ func (s *Stream) DetectCongestion() bool {
 		return false
 	}
 
-	avgRTT := s.GetAverageRTT()
+	avgRTT := s.getAverageRTTLocked()
 	if avgRTT == 0 {
 		return false
 	}

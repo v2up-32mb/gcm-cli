@@ -524,12 +524,12 @@
             document.getElementById('flow_rtt_avg_detail').textContent = avgRTT + ' ms';
             document.getElementById('flow_loss_rate_detail').textContent = lossRate.toFixed(2) + ' %';
 
-            // 拥塞状态判断
+            // 拥塞状态判断（基于丢包率，RTT 仅作参考）
             const congestionStatus = document.getElementById('congestion_status');
-            if (lossRate > 5 || avgRTT > 200) {
+            if (lossRate > 5) {
                 congestionStatus.textContent = '拥塞';
                 congestionStatus.className = 'text-sm font-semibold text-red-400';
-            } else if (lossRate > 2 || avgRTT > 100) {
+            } else if (lossRate > 2) {
                 congestionStatus.textContent = '轻微拥塞';
                 congestionStatus.className = 'text-sm font-semibold text-yellow-400';
             } else {
