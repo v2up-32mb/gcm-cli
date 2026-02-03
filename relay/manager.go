@@ -436,11 +436,19 @@ func (rm *RelayManager) ForceRescore() bool {
 		return false
 	}
 	rm.lastForceRescoreTime = now
-	beforeBest := rm.GetNextRelay()
+	// 直接访问数据，避免在持有写锁时调用需要读锁的方法（防止死锁）
+	var beforeBest *RelayNode
+	if rm.isInitialized && len(rm.optimalRelays) > 0 {
+		beforeBest = rm.optimalRelays[0]
+	}
 	rm.mu.Unlock()
 
-	rm.log.Warn("触发强制重新评分 (原最优: %s:%d %dms)...",
-		beforeBest.IP, beforeBest.Port, beforeBest.Latency.Milliseconds())
+	if beforeBest != nil {
+		rm.log.Warn("触发强制重新评分 (原最优: %s:%d %dms)...",
+			beforeBest.IP, beforeBest.Port, beforeBest.Latency.Milliseconds())
+	} else {
+		rm.log.Warn("触发强制重新评分 (无可用节点)...")
+	}
 
 	// 重新解析原始节点列表并测速
 	candidateNodes := make([]*RelayNode, 0)

@@ -558,7 +558,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		IsDegraded:        false,
 	}
 
-	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
 
 	// 设置 TCP NODELAY
@@ -732,7 +732,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		IsDegraded:        false,
 	}
 
-	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
 
 	// 设置 TCP NODELAY
@@ -864,7 +864,7 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 		IsDegraded:        false,
 	}
 
-	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
 
 	// 设置 TCP NODELAY
@@ -900,7 +900,7 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 // messageLoop 消息处理循环
 func (p *ConnectionPool) messageLoop(item *ConnItem) {
 	ws := item.WS
-	connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 
 	// 设置 Pong 处理器，处理心跳响应
 	ws.SetPongHandler(func(appData string) error {
@@ -1286,7 +1286,7 @@ func formatConnID(connID []byte) string {
 	if len(connID) != 3 {
 		return "??????"
 	}
-	return fmt.Sprintf("%06x", connID[0]<<16|connID[1]<<8|connID[2])
+	return fmt.Sprintf("%02x%02x%02x", connID[0], connID[1], connID[2])
 }
 
 // ReleaseConnection 释放连接
@@ -1598,7 +1598,7 @@ func (p *ConnectionPool) logStats() {
 	// 从 managerByConn 获取所有连接
 	p.mu.RLock()
 	for item, mgr := range p.managerByConn {
-		connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+		connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 		allConns = append(allConns, connInfo{
 			id:      connIDStr,
 			rtt:     item.RTT,
@@ -1657,7 +1657,7 @@ func (p *ConnectionPool) sendHeartbeat() {
 
 	for _, item := range p.pool {
 		if item.WS != nil {
-			connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+			connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 
 			// 检查是否有待响应的心跳
 			if lastPing, ok := p.pendingHeartbeats[connIDStr]; ok {
@@ -1803,6 +1803,15 @@ func (p *ConnectionPool) GetEnhancedStats() PoolStatsInfo {
 	bytesReceived := atomic.LoadInt64(&p.stats.BytesReceived)
 	createdConnections := atomic.LoadInt64(&p.stats.CreatedConnections)
 	closedConnections := atomic.LoadInt64(&p.stats.ClosedConnections)
+
+	// 累加当前活跃连接的流量（总流量 = 已关闭连接流量 + 存活连接流量）
+	p.mu.RLock()
+	for conn := range p.managerByConn {
+		sent, recv, _ := conn.Traffic.GetSnapshot()
+		bytesSent += sent
+		bytesReceived += recv
+	}
+	p.mu.RUnlock()
 
 	uptime := time.Since(p.stats.StartTime)
 
