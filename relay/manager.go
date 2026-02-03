@@ -262,12 +262,9 @@ func (rm *RelayManager) rescoreAll() {
 	rm.logTopRelays()
 }
 
-// resortByScore 按分数重新排序
-func (rm *RelayManager) resortByScore() {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-
-	// 按分数排序
+// resortByScoreLocked 按分数重新排序（调用者必须持有写锁）
+func (rm *RelayManager) resortByScoreLocked() {
+	// 按分数排序（冒泡排序）
 	for i := 0; i < len(rm.optimalRelays)-1; i++ {
 		for j := i + 1; j < len(rm.optimalRelays); j++ {
 			if rm.optimalRelays[i].Score > rm.optimalRelays[j].Score {
@@ -275,6 +272,13 @@ func (rm *RelayManager) resortByScore() {
 			}
 		}
 	}
+}
+
+// resortByScore 按分数重新排序（公开版本，自动加锁）
+func (rm *RelayManager) resortByScore() {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.resortByScoreLocked()
 }
 
 // ReportFailure 记录失败
@@ -308,20 +312,24 @@ func (rm *RelayManager) ReportFailure(ip string, port int) {
 			// 移除节点
 			rm.optimalRelays = append(rm.optimalRelays[:idx], rm.optimalRelays[idx+1:]...)
 		} else {
-			rm.resortByScore()
+			rm.resortByScoreLocked()
 		}
 	}
 }
 
-// GetNextRelay 获取最优节点
-func (rm *RelayManager) GetNextRelay() *RelayNode {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
+// getNextRelayLocked 获取最优节点（调用者必须持有锁）
+func (rm *RelayManager) getNextRelayLocked() *RelayNode {
 	if !rm.isInitialized || len(rm.optimalRelays) == 0 {
 		return nil
 	}
 	return rm.optimalRelays[0]
+}
+
+// GetNextRelay 获取最优节点（公开版本，自动加锁）
+func (rm *RelayManager) GetNextRelay() *RelayNode {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.getNextRelayLocked()
 }
 
 // GetCurrentBest 获取当前最优节点
@@ -502,9 +510,9 @@ func (rm *RelayManager) ForceRescore() bool {
 		}
 	}
 
-	rm.resortByScore()
+	rm.resortByScoreLocked()
 
-	afterBest := rm.GetNextRelay()
+	afterBest := rm.getNextRelayLocked()
 	rm.log.Info("强制重评完成: 有效节点%d个", len(rm.optimalRelays))
 	if beforeBest != nil && afterBest != nil {
 		rm.log.Info("最优节点: %s:%d(%dms) -> %s:%d(%dms)",
