@@ -157,25 +157,6 @@
             </div>
         </div>
 
-        <!-- Flow Control Stats -->
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
-            <div class="card rounded-xl p-4 text-center">
-                <div class="text-gray-400 text-sm mb-1">平均窗口</div>
-                <div id="flow_window_avg" class="text-2xl font-bold text-purple-400 stat-value">--</div>
-                <div class="text-xs text-gray-500 mt-1">KB</div>
-            </div>
-            <div class="card rounded-xl p-4 text-center">
-                <div class="text-gray-400 text-sm mb-1">平均 RTT</div>
-                <div id="flow_rtt_avg" class="text-2xl font-bold text-cyan-400 stat-value">--</div>
-                <div class="text-xs text-gray-500 mt-1">ms</div>
-            </div>
-            <div class="card rounded-xl p-4 text-center">
-                <div class="text-gray-400 text-sm mb-1">丢包率</div>
-                <div id="flow_loss_rate" class="text-2xl font-bold text-red-400 stat-value">--</div>
-                <div class="text-xs text-gray-500 mt-1">%</div>
-            </div>
-        </div>
-
         <!-- Traffic Stats -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
             <div class="card rounded-xl p-6">
@@ -512,10 +493,6 @@
             const avgRTT = metrics.gcm_flow_rtt_avg || 0;
             const lossRate = (metrics.gcm_flow_loss_rate || 0) * 100; // 转换为百分比
             const streamCount = metrics.gcm_flow_stream_count || 0;
-
-            document.getElementById('flow_window_avg').textContent = avgWindow.toFixed(0);
-            document.getElementById('flow_rtt_avg').textContent = avgRTT;
-            document.getElementById('flow_loss_rate').textContent = lossRate.toFixed(2);
 
             document.getElementById('flow_window_avg_detail').textContent = avgWindow.toFixed(1) + ' KB';
             document.getElementById('flow_window_min').textContent = minWindow.toFixed(1) + ' KB';
