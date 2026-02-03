@@ -1802,30 +1802,47 @@ func (p *ConnectionPool) adjustPoolSize() {
 
 // GetEnhancedStats 获取增强统计信息
 func (p *ConnectionPool) GetEnhancedStats() PoolStatsInfo {
+	// 使用原子操作读取所有统计字段，避免数据竞争
+	requests := atomic.LoadInt64(&p.stats.Requests)
+	successes := atomic.LoadInt64(&p.stats.Successes)
+	failures := atomic.LoadInt64(&p.stats.Failures)
+	timeouts := atomic.LoadInt64(&p.stats.Timeouts)
+	totalResponseTime := atomic.LoadInt64(&p.stats.TotalResponseTime)
+	minResponseTime := atomic.LoadInt64(&p.stats.MinResponseTime)
+	maxResponseTime := atomic.LoadInt64(&p.stats.MaxResponseTime)
+	bytesSent := atomic.LoadInt64(&p.stats.BytesSent)
+	bytesReceived := atomic.LoadInt64(&p.stats.BytesReceived)
+	createdConnections := atomic.LoadInt64(&p.stats.CreatedConnections)
+	closedConnections := atomic.LoadInt64(&p.stats.ClosedConnections)
+
 	uptime := time.Since(p.stats.StartTime)
+
+	// 计算成功率（使用原子读取的值）
 	successRate := 0.0
-	if p.stats.Requests > 0 {
-		successRate = float64(p.stats.Successes) / float64(p.stats.Requests) * 100
+	if requests > 0 {
+		successRate = float64(successes) / float64(requests) * 100
 	}
+
+	// 计算平均响应时间（使用原子读取的值）
 	avgResponseTime := 0.0
-	if p.stats.Successes > 0 {
-		avgResponseTime = float64(p.stats.TotalResponseTime) / float64(p.stats.Successes)
+	if successes > 0 {
+		avgResponseTime = float64(totalResponseTime) / float64(successes)
 	}
 
 	return PoolStatsInfo{
-		Requests:           p.stats.Requests,
-		Successes:          p.stats.Successes,
-		Failures:           p.stats.Failures,
-		Timeouts:           p.stats.Timeouts,
+		Requests:           requests,
+		Successes:          successes,
+		Failures:           failures,
+		Timeouts:           timeouts,
 		SuccessRate:        successRate,
 		AvgResponseTime:    avgResponseTime,
-		MinResponseTime:    float64(p.stats.MinResponseTime),
-		MaxResponseTime:    float64(p.stats.MaxResponseTime),
-		BytesSent:          p.stats.BytesSent,
-		BytesReceived:      p.stats.BytesReceived,
+		MinResponseTime:    float64(minResponseTime),
+		MaxResponseTime:    float64(maxResponseTime),
+		BytesSent:          bytesSent,
+		BytesReceived:      bytesReceived,
 		Uptime:             uptime,
-		CreatedConnections: p.stats.CreatedConnections,
-		ClosedConnections:  p.stats.ClosedConnections,
+		CreatedConnections: createdConnections,
+		ClosedConnections:  closedConnections,
 		PoolSize:           len(p.pool),
 		ActiveConnections:  int(atomic.LoadInt32(&p.activeConnections)),
 		PendingConnections: int(atomic.LoadInt32(&p.pendingConnections)),
