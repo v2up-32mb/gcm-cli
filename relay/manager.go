@@ -318,6 +318,28 @@ func (rm *RelayManager) GetCurrentBest() *RelayNode {
 	return rm.GetNextRelay()
 }
 
+// GetBestRelayExcluding 获取最优节点（排除指定地址）
+func (rm *RelayManager) GetBestRelayExcluding(excludeAddr string) *RelayNode {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
+	if !rm.isInitialized || len(rm.optimalRelays) == 0 {
+		return nil
+	}
+
+	// 遍历优选节点列表，找到第一个不是 excludeAddr 的节点
+	for _, node := range rm.optimalRelays {
+		addr := fmt.Sprintf("%s:%d", node.IP, node.Port)
+		if addr != excludeAddr {
+			return node
+		}
+	}
+
+	// 如果所有节点都被排除，返回 nil
+	return nil
+}
+
+
 // testLatency 单个节点测速
 func (rm *RelayManager) testLatency(node *RelayNode) *RelayNode {
 	start := time.Now()

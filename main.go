@@ -34,14 +34,15 @@ func (w *websocketLogger) Write(p []byte) (n int, err error) {
 }
 
 var (
-	cfg          *config.Config
-	relayManager *relay.RelayManager
-	dnsCache     *dns.DNSCache
-	dohClient    *dns.DoHClient
-	echManager   *ech.EchManager
-	connPool     *pool.ConnectionPool
-	socks5Server *socks5.Server
-	metricsSrv   *metrics.Server
+	cfg             *config.Config
+	relayManager    *relay.RelayManager
+	dnsCache        *dns.DNSCache
+	dohClient       *dns.DoHClient
+	echManager      *ech.EchManager
+	connPool        *pool.ConnectionPool
+	qualityMonitor  *pool.ConnectionQualityMonitor
+	socks5Server    *socks5.Server
+	metricsSrv      *metrics.Server
 )
 
 func main() {
@@ -166,6 +167,15 @@ func main() {
 		log.Debug("ECH 定时刷新任务已启动")
 	}
 
+	// 启动连接质量监控器（如果启用）
+	if cfg.EnableQualityMonitor {
+		log.Info("正在启动连接质量监控器...")
+		qualityMonitor = pool.NewConnectionQualityMonitor(connPool, cfg, logger.GetLogger("QualityMonitor"))
+		qualityMonitor.Start()
+		defer qualityMonitor.Stop()
+		log.Debug("连接质量监控器已启动 (检查间隔: %v)", cfg.GetQualityCheckInterval())
+	}
+
 	printReadyInfo(log)
 
 	// 等待信号
@@ -191,6 +201,10 @@ func printStartupInfo(log *logger.Logger) {
 	log.Info("断线重连: %v", cfg.EnableAutoReconnect)
 	log.Info("动态池调整: %v", cfg.EnableDynamicPool)
 	log.Info("多路复用: %v", cfg.EnableMultiplex)
+	log.Info("质量监控: %v", cfg.EnableQualityMonitor)
+	if cfg.EnableQualityMonitor {
+		log.Info("质量检查间隔: %v", cfg.GetQualityCheckInterval())
+	}
 	log.Info("----------------------------------------")
 }
 

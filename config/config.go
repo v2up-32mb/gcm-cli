@@ -303,6 +303,13 @@ type Config struct {
 
 	// 拥塞控制配置
 	CongestionControlInterval yamlDuration `yaml:"congestionControlInterval" json:"congestionControlInterval"` // 拥塞控制检查间隔
+
+	// 连接质量监控配置
+	EnableQualityMonitor       bool         `yaml:"enableQualityMonitor" json:"enableQualityMonitor"`             // 是否启用质量监控
+	QualityCheckInterval       yamlDuration `yaml:"qualityCheckInterval" json:"qualityCheckInterval"`             // 质量检查间隔
+	QualityDegradeThreshold    int64        `yaml:"qualityDegradeThreshold" json:"qualityDegradeThreshold"`       // 劣化阈值（分数 < 60）
+	QualityRelaySwitchCooldown yamlDuration `yaml:"qualityRelaySwitchCooldown" json:"qualityRelaySwitchCooldown"` // 节点切换冷却期
+	QualityMinDegradedCount    int          `yaml:"qualityMinDegradedCount" json:"qualityMinDegradedCount"`       // 触发切换的最小劣化连接数
 }
 
 // GetConnectionTTL 返回连接 TTL 的 time.Duration 值
@@ -410,6 +417,16 @@ func (c *Config) GetCongestionControlInterval() time.Duration {
 	return c.CongestionControlInterval.Duration
 }
 
+// GetQualityCheckInterval 返回质量检查间隔的 time.Duration 值
+func (c *Config) GetQualityCheckInterval() time.Duration {
+	return c.QualityCheckInterval.Duration
+}
+
+// GetQualityRelaySwitchCooldown 返回节点切换冷却期的 time.Duration 值
+func (c *Config) GetQualityRelaySwitchCooldown() time.Duration {
+	return c.QualityRelaySwitchCooldown.Duration
+}
+
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
@@ -499,5 +516,12 @@ func DefaultConfig() *Config {
 
 		// 拥塞控制配置
 		CongestionControlInterval: yamlDuration{time.Minute}, // 60秒
+
+		// 连接质量监控配置
+		EnableQualityMonitor:       true,                          // 默认启用
+		QualityCheckInterval:       yamlDuration{10 * time.Second}, // 10秒检查一次
+		QualityDegradeThreshold:    60,                            // 分数 < 60 视为劣化
+		QualityRelaySwitchCooldown: yamlDuration{5 * time.Minute}, // 5分钟冷却期
+		QualityMinDegradedCount:    2,                             // 至少2个劣化连接才触发切换
 	}
 }

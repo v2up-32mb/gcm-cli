@@ -239,6 +239,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	connectMsg := protocol.NewConnectMessage(wsID, streamID, resolvedHost, port)
 	if err := connItem.WriteMessage(websocket.BinaryMessage, connectMsg.Encode()); err != nil {
 		s.log.Error("发送 CONNECT 消息失败: %v", err)
+		// 记录请求失败
+		connItem.RecordFailure()
 		s.pool.UnregisterStreamHandler(connItem, streamID)
 		s.pool.ReleaseConnection(connItem)
 		return
@@ -300,6 +302,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 					// 增加 Stream 计数
 					connItem.Traffic.IncStream()
 					timeoutTimer.Stop()
+					// 记录请求成功
+					connItem.RecordSuccess()
 					if s.cfg.EnableStats {
 						s.pool.RecordRequestSuccess(requestStartTime)
 					}
@@ -402,6 +406,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 		// 连接超时
 		if !connected {
 			s.log.Warn("隧道超时: %s:%d", originalHost, port)
+			// 记录请求失败
+			connItem.RecordFailure()
 			if s.cfg.EnableStats {
 				s.pool.RecordRequestTimeout()
 			}
@@ -411,6 +417,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 		// 上下文取消
 		if !connected {
 			s.log.Warn("隧道建立被取消: %s:%d", originalHost, port)
+			// 记录请求失败
+			connItem.RecordFailure()
 			cleanup()
 		}
 	case <-closed:

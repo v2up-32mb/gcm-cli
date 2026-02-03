@@ -38,6 +38,19 @@ type ConnItem struct {
 	mu           sync.Mutex          // 保护 Streams 和 targets
 	writeMu      sync.Mutex          // 保护 WS 写操作
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
+
+	// 质量监控字段
+	QualityScore      int64              // 质量评分 (0-100)，原子操作
+	BaselineRTT       time.Duration      // 基线 RTT（创建时的 RTT）
+	RTTHistory        [10]time.Duration  // RTT 历史（环形缓冲区）
+	RTTIndex          int                // RTT 历史索引
+	HeartbeatFailures int64              // 心跳失败次数（原子操作）
+	RequestFailures   int64              // 请求失败次数（原子操作）
+	RequestSuccesses  int64              // 请求成功次数（原子操作）
+	LastQualityCheck  time.Time          // 上次质量检查时间
+	IsDegraded        bool               // 是否已劣化
+	DegradedSince     time.Time          // 劣化开始时间
+	qualityMu         sync.Mutex         // 保护质量监控字段
 }
 
 // WriteMessage 线程安全的 WebSocket 写入方法
@@ -98,6 +111,66 @@ func (c *ConnItem) LoadFactor(maxStreams int) float64 {
 		return 1.0
 	}
 	return float64(c.Streams) / float64(maxStreams)
+}
+
+// ============================================================================
+// 质量监控方法
+// ============================================================================
+
+// RecordRTT 记录 RTT 样本
+func (c *ConnItem) RecordRTT(rtt time.Duration) {
+	c.qualityMu.Lock()
+	defer c.qualityMu.Unlock()
+
+	// 更新 RTT 历史（环形缓冲区）
+	c.RTTHistory[c.RTTIndex] = rtt
+	c.RTTIndex = (c.RTTIndex + 1) % len(c.RTTHistory)
+
+	// 更新当前 RTT
+	c.RTT = rtt
+}
+
+// RecordSuccess 记录成功的请求
+func (c *ConnItem) RecordSuccess() {
+	atomic.AddInt64(&c.RequestSuccesses, 1)
+}
+
+// RecordFailure 记录失败的请求
+func (c *ConnItem) RecordFailure() {
+	atomic.AddInt64(&c.RequestFailures, 1)
+}
+
+// GetAverageRTT 获取平均 RTT
+func (c *ConnItem) GetAverageRTT() time.Duration {
+	c.qualityMu.Lock()
+	defer c.qualityMu.Unlock()
+
+	// 计算 RTT 历史的平均值
+	var sum time.Duration
+	count := 0
+	for _, rtt := range c.RTTHistory {
+		if rtt > 0 {
+			sum += rtt
+			count++
+		}
+	}
+
+	if count == 0 {
+		return c.RTT // 如果没有历史数据，返回当前 RTT
+	}
+	return sum / time.Duration(count)
+}
+
+// GetLossRate 获取丢包率
+func (c *ConnItem) GetLossRate() float64 {
+	successes := atomic.LoadInt64(&c.RequestSuccesses)
+	failures := atomic.LoadInt64(&c.RequestFailures)
+	total := successes + failures
+
+	if total == 0 {
+		return 0
+	}
+	return float64(failures) / float64(total)
 }
 
 // StreamHandler 流处理器
@@ -479,6 +552,16 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
+		// 初始化质量监控字段
+		QualityScore:      100, // 初始满分
+		BaselineRTT:       latency,
+		RTTHistory:        [10]time.Duration{},
+		RTTIndex:          0,
+		HeartbeatFailures: 0,
+		RequestFailures:   0,
+		RequestSuccesses:  0,
+		LastQualityCheck:  time.Now(),
+		IsDegraded:        false,
 	}
 
 	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
@@ -638,6 +721,16 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
+		// 初始化质量监控字段
+		QualityScore:      100, // 初始满分
+		BaselineRTT:       latency,
+		RTTHistory:        [10]time.Duration{},
+		RTTIndex:          0,
+		HeartbeatFailures: 0,
+		RequestFailures:   0,
+		RequestSuccesses:  0,
+		LastQualityCheck:  time.Now(),
+		IsDegraded:        false,
 	}
 
 	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
@@ -680,6 +773,131 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 	return true
 }
 
+// createConnectionWithRelay 使用指定的中转节点创建连接
+func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reason string) bool {
+	// 检查连接池是否已满
+	currentSize := int(len(p.pool)) + int(atomic.LoadInt32(&p.activeConnections)) +
+		int(atomic.LoadInt32(&p.pendingConnections))
+	if currentSize >= p.cfg.MaxPoolSize {
+		p.log.Debug("连接池已满 (%d/%d)，跳过创建: %s", currentSize, p.cfg.MaxPoolSize, reason)
+		return false
+	}
+
+	atomic.AddInt32(&p.pendingConnections, 1)
+	defer atomic.AddInt32(&p.pendingConnections, -1)
+
+	atomic.AddInt64(&p.stats.CreatedConnections, 1)
+
+	// 使用指定的中转节点
+	url := fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+	customDial := func(network, addr string) (net.Conn, error) {
+		return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
+	}
+	p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
+
+	headers := make(http.Header)
+	headers.Set("Host", p.cfg.WorkerHost)
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
+
+	tlsConfig := p.getTLSConfig()
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: p.cfg.GetConnectionTimeout(),
+		NetDial:          customDial,
+		TLSClientConfig:  tlsConfig,
+	}
+
+	// 使用 channel 实现超时保护
+	type dialResult struct {
+		ws   *websocket.Conn
+		resp *http.Response
+		err  error
+	}
+	resultChan := make(chan dialResult, 1)
+
+	go func() {
+		ws, resp, err := dialer.Dial(url, headers)
+		resultChan <- dialResult{ws, resp, err}
+	}()
+
+	startTime := time.Now()
+	var ws *websocket.Conn
+	var resp *http.Response
+	var err error
+
+	select {
+	case res := <-resultChan:
+		ws, resp, err = res.ws, res.resp, res.err
+	case <-time.After(p.cfg.GetConnectionTimeout() * 2):
+		atomic.AddInt64(&p.stats.Failures, 1)
+		p.log.Warn("连接失败 (%s): 总体超时", reason)
+		return false
+	}
+
+	if err != nil {
+		atomic.AddInt64(&p.stats.Failures, 1)
+		p.log.Warn("连接失败 (%s): %v", reason, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	latency := time.Since(startTime)
+	connectionID := p.generateWSID()
+	relayAddr := fmt.Sprintf("%s:%d", relay.IP, relay.Port)
+
+	item := &ConnItem{
+		WS:           ws,
+		ConnectionID: connectionID,
+		RelayAddr:    relayAddr,
+		CreatedAt:    time.Now(),
+		RTT:          latency,
+		Streams:      0,
+		Traffic:      &TrafficCounter{},
+		// 初始化质量监控字段
+		QualityScore:      100,
+		BaselineRTT:       latency,
+		RTTHistory:        [10]time.Duration{},
+		RTTIndex:          0,
+		HeartbeatFailures: 0,
+		RequestFailures:   0,
+		RequestSuccesses:  0,
+		LastQualityCheck:  time.Now(),
+		IsDegraded:        false,
+	}
+
+	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
+	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
+
+	// 设置 TCP NODELAY
+	if p.cfg.EnableTcpNoDelay {
+		if nc, ok := ws.UnderlyingConn().(interface{ SetNoDelay(bool) error }); ok {
+			nc.SetNoDelay(true)
+		}
+	}
+
+	// 初始化 StreamManager
+	p.mu.Lock()
+	p.managerByConn[item] = NewStreamManager(
+		item,
+		int(p.cfg.MaxStreamsPerConnection),
+		p.cfg.GetDefaultWindowSize(),
+		p.cfg.GetMinWindowSize(),
+		p.cfg.GetMaxWindowSize(),
+		p.cfg.GetWindowTimeout(),
+	)
+	p.mu.Unlock()
+
+	// 启动消息处理循环
+	go p.messageLoop(item)
+
+	// 将连接加入池
+	p.mu.Lock()
+	p.pool = append(p.pool, item)
+	p.mu.Unlock()
+
+	return true
+}
+
 // messageLoop 消息处理循环
 func (p *ConnectionPool) messageLoop(item *ConnItem) {
 	ws := item.WS
@@ -696,6 +914,8 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 			// 使用指数移动平均 (EMA) 更新 RTT，平滑波动
 			// 新RTT = 0.7 * 旧RTT + 0.3 * 测量RTT
 			item.RTT = time.Duration(int64(item.RTT)*7/10 + int64(rtt)*3/10)
+			// 记录 RTT 到历史缓冲区
+			item.RecordRTT(rtt)
 		}
 
 		delete(p.pendingHeartbeats, connIDStr)
@@ -953,20 +1173,33 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 	}
 
 	// 1. 首先检查空闲池（优先使用空闲连接）
-	for len(p.pool) > 0 {
-		item := p.pool[len(p.pool)-1]
+	// 空闲池已按质量评分排序（在 ReleaseConnection 和 QualityMonitor 中维护）
+	var lowQualityConns []*ConnItem // 收集低质量连接，稍后关闭
+	if len(p.pool) > 0 {
+		// 直接从头部取连接（已排序，头部是最高质量）
+		for len(p.pool) > 0 {
+			item := p.pool[0]
+			p.pool = p.pool[1:]
 
-		if item.WS != nil {
+			if item.WS == nil {
+				continue
+			}
+
+			// 检查连接质量评分
+			qualityScore := atomic.LoadInt64(&item.QualityScore)
+			if qualityScore < 40 {
+				// 质量过低，收集起来稍后关闭（避免持有锁时调用 Close）
+				lowQualityConns = append(lowQualityConns, item)
+				p.log.Warn("连接 [%s] 质量过低 (分数=%d)，跳过使用", formatConnID(item.ConnectionID), qualityScore)
+				continue
+			}
+
 			selectedItem = item
-			selectedReason = "空闲连接"
+			selectedReason = fmt.Sprintf("空闲连接(质量=%d)", qualityScore)
 			selectedScore = calcScore(item, 0)
-			// 移除并标记为来自池中
-			p.pool = p.pool[:len(p.pool)-1]
 			isFromPool = true
 			break
 		}
-		// 如果 item.WS == nil，移除并继续检查下一个
-		p.pool = p.pool[:len(p.pool)-1]
 	}
 
 	// 2. 如果没有从空闲池选择到，检查亲和性连接和活跃连接
@@ -1018,6 +1251,11 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 	}
 
 	p.mu.Unlock()
+
+	// 释放锁后，批量关闭低质量连接（避免死锁）
+	for _, conn := range lowQualityConns {
+		conn.WS.Close()
+	}
 
 	// 如果找到了连接，返回它
 	if selectedItem != nil {
@@ -1078,7 +1316,22 @@ func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 		// 没有活跃的 stream，放回池中以供重用
 		// 注意：不删除 managerByConn 条目，因为 messageLoop 需要它来分发消息
 		// 连接会在关闭时由 messageLoop 的 defer 函数清理
-		p.pool = append(p.pool, item)
+
+		// 有序插入：按质量评分降序插入
+		score := atomic.LoadInt64(&item.QualityScore)
+		insertPos := len(p.pool)
+		for i := 0; i < len(p.pool); i++ {
+			if atomic.LoadInt64(&p.pool[i].QualityScore) < score {
+				insertPos = i
+				break
+			}
+		}
+
+		// 插入到正确位置
+		p.pool = append(p.pool, nil)
+		copy(p.pool[insertPos+1:], p.pool[insertPos:])
+		p.pool[insertPos] = item
+
 		atomic.AddInt32(&p.activeConnections, -1)
 	}
 	// 如果还有活跃的 stream，连接保持活跃状态，直到最后一个释放
