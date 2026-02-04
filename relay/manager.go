@@ -256,9 +256,14 @@ func (rm *RelayManager) rescoreAll() {
 	}
 
 	elapsed := time.Since(startTime)
-	removed := beforeCount - len(rm.optimalRelays)
-	rm.log.Info("重新评分完成: 有效%d个 (移除%d个), 耗时%dms",
-		len(rm.optimalRelays), removed, elapsed.Milliseconds())
+	diff := len(rm.optimalRelays) - beforeCount
+	if diff >= 0 {
+		rm.log.Info("重新评分完成: 有效%d个 (新增%d个), 耗时%dms",
+			len(rm.optimalRelays), diff, elapsed.Milliseconds())
+	} else {
+		rm.log.Info("重新评分完成: 有效%d个 (移除%d个), 耗时%dms",
+			len(rm.optimalRelays), -diff, elapsed.Milliseconds())
+	}
 	rm.logTopRelays()
 }
 

@@ -447,7 +447,7 @@
             requestChart.update();
 
             // Success rate
-            const successRate = metrics.gcm_request_success_rate ?? 0;
+            const successRate = metrics.gcm_requests_success_rate ?? 0;
             document.getElementById('success_rate').textContent = successRate.toFixed(1) + '%';
             document.getElementById('success_rate_bar').style.width = successRate + '%';
 
