@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -153,71 +152,4 @@ func LoadYAML(filepath string) (*Config, error) {
 	}
 
 	return cfg, nil
-}
-
-// SaveYAML 将配置保存为 YAML 文件
-func SaveYAML(cfg *Config, filepath string) error {
-	// 确保目录存在
-	dir := getFileDir(filepath)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("创建目录失败: %w", err)
-		}
-	}
-
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("序列化 YAML 失败: %w", err)
-	}
-
-	if err := os.WriteFile(filepath, data, 0644); err != nil {
-		return fmt.Errorf("写入文件失败: %w", err)
-	}
-
-	return nil
-}
-
-// GetDefaultConfigPath 获取默认配置文件路径
-func GetDefaultConfigPath() string {
-	// 检查当前目录下的 config.yaml
-	if _, err := os.Stat("config.yaml"); err == nil {
-		return "config.yaml"
-	}
-	// 检查当前目录下的 gcm.yaml
-	if _, err := os.Stat("gcm.yaml"); err == nil {
-		return "gcm.yaml"
-	}
-	// 检查当前目录下的 config.json（向后兼容）
-	if _, err := os.Stat("config.json"); err == nil {
-		return "config.json"
-	}
-	return ""
-}
-
-// FindConfigFile 在常见位置查找配置文件
-func FindConfigFile() string {
-	// 查找顺序：config.yaml > gcm.yaml > config.json
-	paths := []string{"config.yaml", "gcm.yaml", "config.json"}
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
-	}
-
-	// 检查用户主目录
-	homeDir, _ := os.UserHomeDir()
-	if homeDir != "" {
-		configPaths := []string{
-			filepath.Join(homeDir, ".config", "gcm", "config.yaml"),
-			filepath.Join(homeDir, ".gcm.yaml"),
-			filepath.Join(homeDir, ".gcmrc"),
-		}
-		for _, path := range configPaths {
-			if _, err := os.Stat(path); err == nil {
-				return path
-			}
-		}
-	}
-
-	return ""
 }

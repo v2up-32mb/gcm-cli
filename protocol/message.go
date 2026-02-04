@@ -2,10 +2,7 @@ package protocol
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/binary"
 	"fmt"
-	"math/big"
 )
 
 // 消息类型常量
@@ -80,48 +77,6 @@ func NewDataMessage(wsID []byte, streamID byte, data []byte) *Message {
 // NewCloseMessage 创建 CLOSE 消息
 func NewCloseMessage(wsID []byte, streamID byte) *Message {
 	return NewMessage(wsID, streamID, MsgTypeClose, nil)
-}
-
-// GenerateWSID 生成随机的 WebSocket ID (3字节)
-func GenerateWSID() []byte {
-	wsID := make([]byte, 3)
-	// 使用 crypto/rand 会更安全，但这里简化处理
-	// 实际应用中应使用 crypto/rand
-	binary.BigEndian.PutUint32(wsID, uint32(0))
-	return wsID
-}
-
-// SetWSIDFromString 从十六进制字符串设置 WSID
-func SetWSIDFromString(hexStr string) ([]byte, error) {
-	wsID := make([]byte, 3)
-	_, err := fmt.Sscanf(hexStr, "%06x", &[]uint32{0}[0])
-	if err != nil {
-		// 手动解析
-		for i := 0; i < 3 && i*2 < len(hexStr); i++ {
-			var b byte
-			_, err := fmt.Sscanf(hexStr[i*2:i*2+2], "%02x", &b)
-			if err != nil {
-				return nil, err
-			}
-			wsID[i] = b
-		}
-	}
-	return wsID, nil
-}
-
-// WSIDToString 将 WSID 转换为十六进制字符串
-func WSIDToString(wsID []byte) string {
-	if len(wsID) != 3 {
-		return "000000"
-	}
-	return fmt.Sprintf("%02x%02x%02x", wsID[0], wsID[1], wsID[2])
-}
-
-// GenerateStreamID 生成随机的流 ID (1字节)
-// 使用 crypto/rand 生成安全的随机数，范围 0-255
-func GenerateStreamID() byte {
-	n, _ := rand.Int(rand.Reader, big.NewInt(256))
-	return byte(n.Int64())
 }
 
 // StreamIDToString 将流 ID 转换为十六进制字符串
