@@ -157,7 +157,10 @@ func (s *Server) handleRequest(conn net.Conn) (originalHost, resolvedHost string
 	}
 
 	if header[1] != cmdConnect {
-		conn.Write([]byte{socks5Version, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		_, err := conn.Write([]byte{socks5Version, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		if err != nil {
+			return "", "", 0, fmt.Errorf("发送错误响应失败: %w", err)
+		}
 		return "", "", 0, fmt.Errorf("不支持的命令: %d", header[1])
 	}
 
@@ -216,7 +219,10 @@ func (s *Server) handleRequest(conn net.Conn) (originalHost, resolvedHost string
 		s.log.Debug("IPv6 请求: %s:%d", originalHost, port)
 
 	default:
-		conn.Write([]byte{socks5Version, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		_, err := conn.Write([]byte{socks5Version, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		if err != nil {
+			return "", "", 0, fmt.Errorf("发送错误响应失败: %w", err)
+		}
 		return "", "", 0, fmt.Errorf("不支持的地址类型: %d", addrType)
 	}
 

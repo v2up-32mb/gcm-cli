@@ -105,7 +105,9 @@ func (c *tunnelConn) Close() error {
 	c.closed = true
 
 	closeMsg := protocol.NewCloseMessage(c.connItem.ConnectionID, c.streamID)
-	c.connItem.WriteMessage(websocket.BinaryMessage, closeMsg.Encode())
+	if err := c.connItem.WriteMessage(websocket.BinaryMessage, closeMsg.Encode()); err != nil {
+		// 记录但继续关闭（连接即将关闭，无法恢复）
+	}
 
 	close(c.closeChan)
 	return nil

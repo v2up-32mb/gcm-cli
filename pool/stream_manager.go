@@ -234,9 +234,9 @@ func (sm *StreamManager) AllocateStream(targetAddr string, timeout time.Duration
 			TargetAddr:   targetAddr,
 			CreatedAt:    time.Now(),
 			LastActiveAt: time.Now(),
-			sendWindow:   DefaultWindowSize,
-			recvWindow:   DefaultWindowSize,
-			windowSize:   DefaultWindowSize,
+			sendWindow:   sm.defaultWindowSize,
+			recvWindow:   sm.defaultWindowSize,
+			windowSize:   sm.defaultWindowSize,
 			sendBlocked:  make(chan struct{}, 1),
 		}
 

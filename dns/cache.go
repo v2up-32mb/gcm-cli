@@ -63,8 +63,8 @@ func (dc *DNSCache) getKey(domain string, queryType string) string {
 
 // Get 获取缓存的 IP
 func (dc *DNSCache) Get(domain string, queryType string) (string, bool) {
-	dc.mu.RLock()
-	defer dc.mu.RUnlock()
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
 
 	key := dc.getKey(domain, queryType)
 	entry, exists := dc.cache[key]
@@ -72,7 +72,7 @@ func (dc *DNSCache) Get(domain string, queryType string) (string, bool) {
 		return "", false
 	}
 
-	// 检查是否过期
+	// 检查是否过期并删除
 	if time.Now().After(entry.ExpiresAt) {
 		delete(dc.cache, key)
 		dc.log.Debug("缓存过期: %s (%s)", domain, queryType)
@@ -154,25 +154,19 @@ func (dc *DNSCache) SetHTTPS(domain string, record *HTTPSRecord) {
 
 // GetHTTPS 获取缓存的 HTTPS 记录
 func (dc *DNSCache) GetHTTPS(domain string) (*HTTPSRecord, bool) {
-	dc.mu.RLock()
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+
 	key := dc.getKey(domain, "HTTPS")
 	entry, exists := dc.cache[key]
 	if !exists || entry.HTTPSRecord == nil {
-		dc.mu.RUnlock()
 		return nil, false
 	}
 
-	// 检查是否过期
+	// 检查是否过期并删除
 	if time.Now().After(entry.ExpiresAt) {
-		dc.mu.RUnlock()
-		// 升级为写锁删除过期条目
-		dc.mu.Lock()
-		// 双重检查：可能在锁升级期间被其他 goroutine 删除或更新
-		if entry, exists := dc.cache[key]; exists && time.Now().After(entry.ExpiresAt) {
-			delete(dc.cache, key)
-			dc.log.Debug("缓存过期: %s (HTTPS)", domain)
-		}
-		dc.mu.Unlock()
+		delete(dc.cache, key)
+		dc.log.Debug("缓存过期: %s (HTTPS)", domain)
 		return nil, false
 	}
 
@@ -180,7 +174,6 @@ func (dc *DNSCache) GetHTTPS(domain string) (*HTTPSRecord, bool) {
 	atomic.AddInt64(&dc.stats.Hits, 1)
 	result := entry.HTTPSRecord
 	ttl := int(time.Until(entry.ExpiresAt).Seconds())
-	dc.mu.RUnlock()
 
 	dc.log.Debug("缓存命中: %s (HTTPS) -> Priority=%d (TTL:%ds)",
 		domain, result.Priority, ttl)

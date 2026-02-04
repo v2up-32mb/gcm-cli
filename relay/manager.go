@@ -30,7 +30,6 @@ type RelayNode struct {
 	TotalConnections  int64   // 累计创建连接数（原子操作）
 	AvgQualityScore   float64 // 平均连接质量评分（0-100）
 	Weight            float64 // 动态权重（用于加权轮询）
-	LastSelected      time.Time // 上次被选中时间
 }
 
 // ParseHostPort 解析 "host:port" 或 "[ipv6]:port" 或 "host"
@@ -407,7 +406,6 @@ func (rm *RelayManager) batchTestLatency(nodes []*RelayNode) []*RelayNode {
 				TotalConnections:  n.TotalConnections,
 				AvgQualityScore:   n.AvgQualityScore,
 				Weight:            n.Weight,
-				LastSelected:      n.LastSelected,
 				// 保留其他状态
 				FailCount: n.FailCount,
 				LastCheck: n.LastCheck,
@@ -708,9 +706,6 @@ func (rm *RelayManager) GetNextRelayWithLoadBalance() *RelayNode {
 	// 使用加权轮询选择节点
 	selected := rm.selectByWeight(candidates)
 	if selected != nil {
-		// 注意: 不在 RLock 下修改 LastSelected，避免并发写入问题
-		// LastSelected 字段当前未被使用，如需使用应改用原子操作或写锁
-
 		// 实时计算权重用于日志（避免读取可能过期的 Weight 字段）
 		weight := rm.calculateWeight(selected)
 		rm.log.Debug("负载均衡选择节点: %s:%d (权重=%.2f, 负载=%d)",

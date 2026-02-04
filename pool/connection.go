@@ -32,7 +32,7 @@ type ConnItem struct {
 	ConnectionID []byte // 3 bytes WS ID
 	RelayAddr    string // 中转节点地址
 	CreatedAt    time.Time
-	RTT          time.Duration
+	RTT          atomic.Int64 // 存储纳秒值
 	Streams      int                 // 当前活跃流数
 	Traffic      *TrafficCounter     // 流量计数器
 	mu           sync.Mutex          // 保护 Streams 和 targets
@@ -126,8 +126,8 @@ func (c *ConnItem) RecordRTT(rtt time.Duration) {
 	c.RTTHistory[c.RTTIndex] = rtt
 	c.RTTIndex = (c.RTTIndex + 1) % len(c.RTTHistory)
 
-	// 更新当前 RTT
-	c.RTT = rtt
+	// 更新当前 RTT（存储纳秒值）
+	c.RTT.Store(rtt.Nanoseconds())
 }
 
 // RecordSuccess 记录成功的请求
@@ -156,7 +156,7 @@ func (c *ConnItem) GetAverageRTT() time.Duration {
 	}
 
 	if count == 0 {
-		return c.RTT // 如果没有历史数据，返回当前 RTT
+		return time.Duration(c.RTT.Load()) // 如果没有历史数据，返回当前 RTT
 	}
 	return sum / time.Duration(count)
 }
@@ -543,7 +543,6 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
 		CreatedAt:    time.Now(),
-		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
 		// 初始化质量监控字段
@@ -557,6 +556,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		LastQualityCheck:  time.Now(),
 		IsDegraded:        false,
 	}
+	item.RTT.Store(latency.Nanoseconds())
 
 	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
@@ -717,7 +717,6 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
 		CreatedAt:    time.Now(),
-		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
 		// 初始化质量监控字段
@@ -731,6 +730,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		LastQualityCheck:  time.Now(),
 		IsDegraded:        false,
 	}
+	item.RTT.Store(latency.Nanoseconds())
 
 	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
@@ -849,7 +849,6 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
 		CreatedAt:    time.Now(),
-		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
 		// 初始化质量监控字段
@@ -863,6 +862,7 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 		LastQualityCheck:  time.Now(),
 		IsDegraded:        false,
 	}
+	item.RTT.Store(latency.Nanoseconds())
 
 	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
@@ -912,7 +912,9 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 			rtt := time.Since(lastPing)
 			// 使用指数移动平均 (EMA) 更新 RTT，平滑波动
 			// 新RTT = 0.7 * 旧RTT + 0.3 * 测量RTT
-			item.RTT = time.Duration(int64(item.RTT)*7/10 + int64(rtt)*3/10)
+			oldRTT := item.RTT.Load()
+			newRTT := (oldRTT*7/10 + rtt.Nanoseconds()*3/10)
+			item.RTT.Store(newRTT)
 			// 记录 RTT 到历史缓冲区
 			item.RecordRTT(rtt)
 		}
@@ -1153,7 +1155,7 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 			loadFactor = float64(streams) / float64(maxStreams)
 		}
 		// RTT 归一化 (假设 2000ms 为最差情况)
-		rttNorm := float64(item.RTT.Milliseconds()) / 2000.0
+		rttNorm := float64(item.RTT.Load()) / (2000.0 * 1e6)
 		if rttNorm > 1.0 {
 			rttNorm = 1.0
 		}
@@ -1228,7 +1230,7 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 					selectedItem = item
 					selectedScore = score
 					selectedReason = fmt.Sprintf("活跃连接(streams:%d/%d, rtt:%dms)",
-						streamCount, maxStreams, item.RTT.Milliseconds())
+						streamCount, maxStreams, time.Duration(item.RTT.Load()).Milliseconds())
 				}
 			}
 		}
@@ -1601,7 +1603,7 @@ func (p *ConnectionPool) logStats() {
 		connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 		allConns = append(allConns, connInfo{
 			id:      connIDStr,
-			rtt:     item.RTT,
+			rtt:     time.Duration(item.RTT.Load()),
 			streams: mgr.GetStreamCount(),
 		})
 	}
@@ -1993,7 +1995,7 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 		result = append(result, ConnectionData{
 			ConnectionID: conn.ConnectionID,
 			RelayAddr:    conn.RelayAddr,
-			RTT:          conn.RTT,
+			RTT:          time.Duration(conn.RTT.Load()),
 			Sent:         sent,
 			Recv:         recv,
 			StreamCount:  0, // 空闲连接没有 stream
@@ -2013,7 +2015,7 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 		result = append(result, ConnectionData{
 			ConnectionID: conn.ConnectionID,
 			RelayAddr:    conn.RelayAddr,
-			RTT:          conn.RTT,
+			RTT:          time.Duration(conn.RTT.Load()),
 			Sent:         sent,
 			Recv:         recv,
 			StreamCount:  mgr.GetStreamCount(), // 使用 StreamManager.GetStreamCount() 作为权威来源
