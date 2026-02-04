@@ -31,7 +31,7 @@ func DefineFlags() []cli.Flag {
 			Name:     "listen",
 			Aliases:  []string{"l"},
 			Usage:    "SOCKS5 监听地址 (如 :10080 或 0.0.0.0:10080)",
-			Value:    ":10080",
+			// 移除默认值，避免覆盖配置文件
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
@@ -80,13 +80,13 @@ func DefineFlags() []cli.Flag {
 		&cli.IntFlag{
 			Name:     "min-pool",
 			Usage:    "最小连接池大小",
-			Value:    3,
+			Value:    10,
 			OnlyOnce: true,
 		},
 		&cli.IntFlag{
 			Name:     "max-pool",
 			Usage:    "最大连接池大小",
-			Value:    15,
+			Value:    50,
 			OnlyOnce: true,
 		},
 
@@ -223,6 +223,7 @@ func DefineFlags() []cli.Flag {
 			Name:     "enable-ech",
 			Aliases:  []string{"e"},
 			Usage:    "启用 TLS ECH (Encrypted Client Hello)",
+                        Value:    true,
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{

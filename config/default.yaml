@@ -9,8 +9,8 @@ userID: ""                      # 代理访问令牌（可选）
 logLevel: "INFO"                # 日志级别: DEBUG/INFO/WARN/ERROR
 
 # ===== 连接池配置 =====
-minPoolSize: 3                  # 最小连接池大小
-maxPoolSize: 15                 # 最大连接池大小
+minPoolSize: 20                 # 最小连接池大小（优化：从 3 提升至 20）
+maxPoolSize: 100                # 最大连接池大小（优化：从 15 提升至 100）
 connectionTTL: "5m"             # 连接最大存活时间（支持单位: s, m, h）
 connectionTimeout: "1s"         # 连接超时时间
 
@@ -22,10 +22,10 @@ warmupTimeout: "30s"            # 预热总超时时间
 # 连接池动态调整配置
 enableDynamicPool: true         # 是否启用动态池大小调整
 dynamicPoolInterval: "1m"       # 动态调整检查间隔
-dynamicPoolMinSize: 2           # 动态调整时的最小值
-dynamicPoolMaxSize: 15          # 动态调整时的最大值
-dynamicPoolLowThreshold: 0.3    # 低负载阈值（活跃率 < 30%）
-dynamicPoolHighThreshold: 0.8   # 高负载阈值（利用率 > 80%）
+dynamicPoolMinSize: 10          # 动态调整时的最小值（优化：从 2 提升至 10）
+dynamicPoolMaxSize: 50          # 动态调整时的最大值（优化：从 15 提升至 50）
+dynamicPoolLowThreshold: 0.2    # 低负载阈值（优化：从 0.3 降至 0.2）
+dynamicPoolHighThreshold: 0.6   # 高负载阈值（优化：从 0.8 降至 0.6）
 
 # ===== 中转节点配置 =====
 relayIPs:                       # 中转节点列表
@@ -80,16 +80,21 @@ enableStats: true               # 是否启用统计增强
 
 # ===== 多路复用配置 =====
 enableMultiplex: true           # 是否启用多路复用（需 Worker 端配合）
-maxStreamsPerConnection: 5      # 每个连接最大并发流数
+maxStreamsPerConnection: 10     # 每个连接最大并发流数（优化：从 5 提升至 10）
 
 # ===== 窗口流控配置 =====
-defaultWindowSize: "256KB"      # 默认窗口大小
-minWindowSize: "32KB"           # 最小窗口大小（拥塞时的下限）
-maxWindowSize: "1MB"            # 最大窗口大小（扩展时的上限）
+defaultWindowSize: "512KB"      # 默认窗口大小（优化：从 256KB 提升至 512KB）
+minWindowSize: "64KB"           # 最小窗口大小（优化：从 32KB 提升至 64KB）
+maxWindowSize: "2MB"            # 最大窗口大小（优化：从 1MB 提升至 2MB）
 windowTimeout: "5s"             # 窗口等待超时时间
 
 # ===== 拥塞控制配置 =====
-congestionControlInterval: "1m" # 拥塞控制检查间隔
+congestionControlInterval: "5s" # 拥塞控制检查间隔（优化：从 1m 缩短至 5s）
+
+# ===== 会话轮换配置 =====
+enableSessionRotation: true     # 是否启用会话轮换（应对 CF 110 秒限制）
+maxSessionLifetime: "90s"        # 会话最大寿命（优化：在 CF 110s 限制前优雅关闭）
+sessionDrainTimeout: "10s"       # 会话排空超时时间
 
 # ===== ECH 配置 =====
 enableECH: false                # 是否启用 TLS ECH (Encrypted Client Hello)

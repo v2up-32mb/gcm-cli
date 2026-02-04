@@ -186,7 +186,7 @@ func (sm *StreamManager) tryAllocateStream(targetAddr string) (byte, bool) {
 	}
 
 	sm.conn.mu.Lock()
-	sm.conn.Streams++
+	sm.conn.Streams.Add(1)
 	sm.conn.Traffic.IncStream()
 	sm.conn.mu.Unlock()
 
@@ -241,7 +241,7 @@ func (sm *StreamManager) AllocateStream(targetAddr string, timeout time.Duration
 		}
 
 		sm.conn.mu.Lock()
-		sm.conn.Streams++
+		sm.conn.Streams.Add(1)
 		sm.conn.Traffic.IncStream()
 		sm.conn.mu.Unlock()
 		sm.mu.Unlock()
@@ -290,8 +290,8 @@ func (sm *StreamManager) UnregisterStream(streamID byte) (targetAddr string, isE
 		sm.clearBit(streamID)
 
 		sm.conn.mu.Lock()
-		if sm.conn.Streams > 0 {
-			sm.conn.Streams--
+		if sm.conn.Streams.Load() > 0 {
+			sm.conn.Streams.Add(-1)
 		}
 		sm.conn.mu.Unlock()
 

@@ -229,6 +229,11 @@ type Config struct {
 	ConnectionTTL     yamlDuration `yaml:"connectionTTL" json:"connectionTTL"`
 	ConnectionTimeout yamlDuration `yaml:"connectionTimeout" json:"connectionTimeout"`
 
+	// 会话轮换配置
+	EnableSessionRotation bool         `yaml:"enableSessionRotation" json:"enableSessionRotation"`
+	MaxSessionLifetime    yamlDuration `yaml:"maxSessionLifetime" json:"maxSessionLifetime"`
+	SessionDrainTimeout   yamlDuration `yaml:"sessionDrainTimeout" json:"sessionDrainTimeout"`
+
 	// 中转节点配置
 	RelayIPs                  []string     `yaml:"relayIPs" json:"relayIPs"`
 	RelayMonitorInterval      yamlDuration `yaml:"relayMonitorInterval" json:"relayMonitorInterval"`
@@ -320,6 +325,16 @@ func (c *Config) GetConnectionTTL() time.Duration {
 // GetConnectionTimeout 返回连接超时的 time.Duration 值
 func (c *Config) GetConnectionTimeout() time.Duration {
 	return c.ConnectionTimeout.Duration
+}
+
+// GetMaxSessionLifetime 返回会话最大寿命的 time.Duration 值
+func (c *Config) GetMaxSessionLifetime() time.Duration {
+	return c.MaxSessionLifetime.Duration
+}
+
+// GetSessionDrainTimeout 返回会话排空超时的 time.Duration 值
+func (c *Config) GetSessionDrainTimeout() time.Duration {
+	return c.SessionDrainTimeout.Duration
 }
 
 // GetRelayMonitorInterval 返回节点监控间隔的 time.Duration 值
@@ -437,13 +452,18 @@ func DefaultConfig() *Config {
 		LogLevel:      INFO,
 
 		// 连接池配置
-		MinPoolSize:       5,
-		MaxPoolSize:       15,
+		MinPoolSize:       10,                     // 优化：从 5 提升至 10
+		MaxPoolSize:       50,                     // 优化：从 15 提升至 50
 		ConnectionTTL:     yamlDuration{5 * time.Minute},
 		ConnectionTimeout: yamlDuration{time.Second},
 
+		// 会话轮换配置
+		EnableSessionRotation: true,                // 启用会话轮换
+		MaxSessionLifetime:    yamlDuration{90 * time.Second}, // 90 秒最大寿命
+		SessionDrainTimeout:   yamlDuration{10 * time.Second}, // 10 秒排空超时
+
 		// 中转节点配置
-		RelayIPs:                  []string{"36.140.124.162:10009", "v6.gh-proxy.org"},
+		RelayIPs:                  []string{},
 		RelayMonitorInterval:      yamlDuration{30 * time.Second},
 		RelayMaxLatency:           yamlDuration{500 * time.Millisecond},
 		RelayFailureThreshold:     3,
@@ -460,7 +480,7 @@ func DefaultConfig() *Config {
 		EnableDoHProxy:          false,
 
 		// ECH 配置
-		EnableECH:          false,
+		EnableECH:          true,
 		ECHDomain:          "cloudflare-ech.com",
 		ECHCacheTTL:        yamlDuration{24 * time.Hour},
 		ECHRefreshInterval: yamlDuration{12 * time.Hour},
@@ -490,14 +510,14 @@ func DefaultConfig() *Config {
 		// 连接池动态调整配置
 		EnableDynamicPool:        true,
 		DynamicPoolInterval:      yamlDuration{time.Minute},
-		DynamicPoolMinSize:       5,
-		DynamicPoolMaxSize:       15,
-		DynamicPoolLowThreshold:  0.3,
-		DynamicPoolHighThreshold: 0.8,
+		DynamicPoolMinSize:       10,                     // 优化：从 5 提升至 10
+		DynamicPoolMaxSize:       50,                     // 优化：从 15 提升至 50
+		DynamicPoolLowThreshold:  0.2,                    // 优化：从 0.3 降至 0.2
+		DynamicPoolHighThreshold: 0.6,                    // 优化：从 0.8 降至 0.6
 
 		// 日志文件配置
 		EnableLogFile:      false,
-		LogFilePath:        "./gcm.log",
+		LogFilePath:        "gcm.log",
 		LogFileMaxSize:     10 * 1024 * 1024,
 		LogFileBackupCount: 3,
 
@@ -506,16 +526,16 @@ func DefaultConfig() *Config {
 
 		// 多路复用配置
 		EnableMultiplex:         true,
-		MaxStreamsPerConnection: 5,
+		MaxStreamsPerConnection: 10, // 优化：从 5 提升至 10
 
 		// 窗口流控配置
-		DefaultWindowSize: yamlByteSize{256 * 1024},      // 256KB
-		MinWindowSize:     yamlByteSize{32 * 1024},       // 32KB
-		MaxWindowSize:     yamlByteSize{1024 * 1024},     // 1MB
+		DefaultWindowSize: yamlByteSize{512 * 1024},      // 512KB，优化：从 256KB 提升
+		MinWindowSize:     yamlByteSize{64 * 1024},       // 64KB，优化：从 32KB 提升
+		MaxWindowSize:     yamlByteSize{2 * 1024 * 1024}, // 2MB，优化：从 1MB 提升
 		WindowTimeout:     yamlDuration{5 * time.Second}, // 5秒
 
 		// 拥塞控制配置
-		CongestionControlInterval: yamlDuration{time.Minute}, // 60秒
+		CongestionControlInterval: yamlDuration{5 * time.Second}, // 5秒，优化：从 60s 缩短
 
 		// 连接质量监控配置
 		EnableQualityMonitor:       true,                          // 默认启用

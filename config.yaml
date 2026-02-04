@@ -1,15 +1,15 @@
 # 工作节点地址
 workerHost: "gcm.ics.de5.net"
 # 本地监听端口
-localPort: 30007
+listenAddress: ":30007"
 # 用户标识
 userID: "v2up"
 # 连接池最小数量
-minPoolSize: 2
+minPoolSize: 10
 # 连接池最大数量
-maxPoolSize: 16
+maxPoolSize: 50
 # 连接存活时间（毫秒）
-connectionTTL: 300000
+connectionTTL: 90000
 # 中继服务器地址列表
 relayIPs:
   - "saas.sin.fan"
@@ -71,9 +71,9 @@ dynamicPoolMinSize: 3
 # 动态池最大数量
 dynamicPoolMaxSize: 100
 # 动态池低负载阈值（百分比）
-dynamicPoolLowThreshold: 0.3
+dynamicPoolLowThreshold: 0.2
 # 动态池高负载阈值（百分比）
-dynamicPoolHighThreshold: 0.8
+dynamicPoolHighThreshold: 0.6
 # 是否启用日志文件
 enableLogFile: false
 # 日志文件路径
@@ -87,4 +87,4 @@ enableStats: true
 # 是否启用多路复用
 enableMultiplex: true
 # 每条连接的最大流数量
-maxStreamsPerConnection: 5
+maxStreamsPerConnection: 6

@@ -263,7 +263,7 @@ func (rm *RelayManager) rescoreAll() {
 		rm.log.Info("重新评分完成: 有效%d个 (移除%d个), 耗时%dms",
 			len(rm.optimalRelays), -diff, elapsed.Milliseconds())
 	}
-	rm.logTopRelays()
+	rm.logTopRelaysLocked()
 }
 
 // resortByScoreLocked 按分数重新排序（调用者必须持有写锁）
@@ -530,7 +530,11 @@ func (rm *RelayManager) ForceRescore() bool {
 func (rm *RelayManager) logTopRelays() {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
+	rm.logTopRelaysLocked()
+}
 
+// logTopRelaysLocked 输出当前 Top 节点（调用者必须持有锁）
+func (rm *RelayManager) logTopRelaysLocked() {
 	if len(rm.optimalRelays) == 0 {
 		rm.log.Warn("无可用中转节点")
 		return
@@ -549,9 +553,10 @@ func (rm *RelayManager) GetStats() RelayStats {
 	defer rm.mu.RUnlock()
 
 	stats := RelayStats{
-		TotalNodes: len(rm.allNodes),
-		TotalTests: rm.totalTestCount,
-		Removed:    rm.totalRemovedCount,
+		TotalNodes:   len(rm.allNodes),
+		OptimalNodes: len(rm.optimalRelays),
+		TotalTests:   rm.totalTestCount,
+		Removed:      rm.totalRemovedCount,
 	}
 
 	// 优先从最优节点获取延迟统计，如果没有则使用所有节点
@@ -717,7 +722,8 @@ func (rm *RelayManager) GetNextRelayWithLoadBalance() *RelayNode {
 
 // RelayStats 中转节点统计
 type RelayStats struct {
-	TotalNodes   int
+	TotalNodes   int           // 所有节点数
+	OptimalNodes int           // 有效节点数（低延迟）
 	TotalTests   int
 	Removed      int
 	AvgLatency   time.Duration

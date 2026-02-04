@@ -32,12 +32,15 @@ type ConnItem struct {
 	ConnectionID []byte // 3 bytes WS ID
 	RelayAddr    string // 中转节点地址
 	CreatedAt    time.Time
-	RTT          atomic.Int64 // 存储纳秒值
-	Streams      int                 // 当前活跃流数
+	ExpiresAt    time.Time           // 过期时间（带随机偏移，用于错峰销毁）
+	RTT          atomic.Int64        // 存储纳秒值
+	Streams      atomic.Int32        // 当前活跃流数（原子操作）
 	Traffic      *TrafficCounter     // 流量计数器
-	mu           sync.Mutex          // 保护 Streams 和 targets
+	mu           sync.Mutex          // 保护 targets
 	writeMu      sync.Mutex          // 保护 WS 写操作
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
+	closing      atomic.Bool          // 正在关闭标记（防止重复清理）
+	inPool       atomic.Bool          // 是否在空闲池中（防止重复放入）
 
 	// 质量监控字段
 	QualityScore      int64              // 质量评分 (0-100)，原子操作
@@ -107,15 +110,61 @@ func (c *ConnItem) LoadFactor(maxStreams int) float64 {
 	if maxStreams <= 0 {
 		return 0
 	}
-	if c.Streams >= maxStreams {
+	streams := c.Streams.Load()
+	if streams >= int32(maxStreams) {
 		return 1.0
 	}
-	return float64(c.Streams) / float64(maxStreams)
+	return float64(streams) / float64(maxStreams)
 }
 
 // ============================================================================
 // 质量监控方法
 // ============================================================================
+
+// CalculateQualityScore 计算连接质量评分（0-100）
+// 评分算法：RTT 50% + 丢包率 30% + 流数 20%
+func (c *ConnItem) CalculateQualityScore() int64 {
+	c.qualityMu.Lock()
+	defer c.qualityMu.Unlock()
+
+	// RTT 评分 (0-100，越低越好)
+	rtt := time.Duration(c.RTT.Load())
+	rttScore := int64(100)
+	if rtt > 0 {
+		// RTT 每增加 10ms，扣 1 分，最低 0 分
+		rttMs := rtt.Milliseconds()
+		score := 100 - rttMs/10
+		if score < 0 {
+			score = 0
+		}
+		rttScore = int64(score)
+	}
+
+	// 丢包率评分 (0-100)
+	lossRate := c.GetLossRate()
+	lossScore := int64(100)
+	if lossRate > 0 {
+		score := 100 - int64(lossRate*100)
+		if score < 0 {
+			score = 0
+		}
+		lossScore = score
+	}
+
+	// 流数评分 (0-100，越少越好)
+	streamScore := int64(100 - c.Streams.Load()*5)
+	if streamScore < 0 {
+		streamScore = 0
+	}
+
+	// 加权平均: RTT 50% + 丢包 30% + 流数 20%
+	score := (rttScore*50 + lossScore*30 + streamScore*20) / 100
+
+	// 缓存评分
+	atomic.StoreInt64(&c.QualityScore, score)
+
+	return score
+}
 
 // RecordRTT 记录 RTT 样本
 func (c *ConnItem) RecordRTT(rtt time.Duration) {
@@ -200,6 +249,10 @@ type ConnectionPool struct {
 	// 目标地址亲和性映射 (用于多路复用优化)
 	targetToConn map[string]*ConnItem // 目标地址 -> 当前服务的连接
 
+	// 亲和性分数增强
+	connAffinityScore map[*ConnItem]map[string]int64 // 连接 -> 目标的亲和分数
+	affinityMu        sync.RWMutex
+
 	lastRelayFetchTime time.Time
 	currentMinPoolSize int32
 
@@ -207,6 +260,9 @@ type ConnectionPool struct {
 	echFailureCount    int32     // ECH 连续失败次数
 	echDisabledUntil   time.Time // ECH 禁用截止时间
 	echFallbackEnabled bool      // 是否已启用 ECH 降级
+
+	// 会话轮换器
+	sessionRotator *SessionRotator
 
 	stats    PoolStats
 	stopChan chan struct{}
@@ -270,80 +326,69 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr 
 		go p.dynamicPoolLoop()
 	}
 
+	// 初始化会话轮换器（应对 CF 110 秒限制）
+	if cfg.EnableSessionRotation {
+		p.sessionRotator = NewSessionRotator(p, cfg)
+		p.log.Info("会话轮换器已启动 (最大寿命: %v, 排空超时: %v)",
+			cfg.GetMaxSessionLifetime(), cfg.GetSessionDrainTimeout())
+	}
+
 	return p
 }
 
-// Warmup 连接池预热
+// Warmup 连接池预热（串行创建，错峰启动）
 func (p *ConnectionPool) Warmup() error {
 	if !p.cfg.EnablePoolWarmup || p.currentMinPoolSize <= 0 {
 		return nil
 	}
 
-	p.log.Info("开始预热连接池，目标: %d 个连接...", p.currentMinPoolSize)
+	targetSize := int(p.currentMinPoolSize)
+	p.log.Info("开始预热连接池，目标: %d 个连接（串行创建）...", targetSize)
 
 	startTime := time.Now()
-	targetSize := int(p.currentMinPoolSize)
-	concurrency := p.cfg.WarmupConcurrency
 	created := 0
 	failed := 0
-	consecutiveFailures := 0 // 连续失败计数
+	consecutiveFailures := 0
 
-	// 分批次创建连接
+	// 计算创建间隔：将 TTL 分散到所有连接上
+	// 例如 TTL=5min, 目标=10个连接，间隔=30s
+	ttl := p.cfg.GetConnectionTTL()
+	interval := ttl / time.Duration(targetSize+1)
+	// 限制间隔范围：最小 200ms，最大 2s
+	if interval < 200*time.Millisecond {
+		interval = 200 * time.Millisecond
+	}
+	if interval > 2*time.Second {
+		interval = 2 * time.Second
+	}
+	p.log.Debug("预热间隔: %v", interval)
+
+	// 串行创建连接
 	for created < targetSize {
-		remaining := targetSize - created
-		batchSize := min(remaining, concurrency)
-
-		// 并发创建一批连接，使用 err channel 等待每个完成
-		type result struct {
-			success bool
-		}
-		results := make(chan result, batchSize)
-
-		for i := 0; i < batchSize; i++ {
-			go func() {
-				// createConnection 内部会同步等待连接建立完成
-				success := p.createConnectionSync("预热")
-				results <- result{success: success}
-			}()
-		}
-
-		// 等待所有连接创建完成
-		batchFailed := 0
-		for i := 0; i < batchSize; i++ {
-			res := <-results
-			if res.success {
-				created++
-				consecutiveFailures = 0 // 重置连续失败计数
-			} else {
-				failed++
-				batchFailed++
-			}
-		}
-		close(results)
-
 		// 检查超时
 		if time.Since(startTime) > p.cfg.GetWarmupTimeout() {
 			p.log.Warn("预热超时，已创建 %d/%d 个连接 (失败: %d)", created, targetSize, failed)
 			break
 		}
 
-		if created >= targetSize {
-			break
-		}
-
-		// 如果这批全部失败，增加连续失败计数
-		if batchFailed >= batchSize {
+		// 创建单个连接
+		success := p.createConnectionSync("预热")
+		if success {
+			created++
+			consecutiveFailures = 0
+			p.log.Debug("预热进度: %d/%d", created, targetSize)
+		} else {
+			failed++
 			consecutiveFailures++
-			// 如果连续失败超过 3 次，快速退出（网络可能不可用）
 			if consecutiveFailures > 3 {
 				p.log.Warn("预热连续失败 %d 次，跳过预热", consecutiveFailures)
 				break
 			}
-			p.log.Warn("本批连接全部失败，等待后重试...")
-			time.Sleep(500 * time.Millisecond)
-		} else {
-			consecutiveFailures = 0
-			time.Sleep(100 * time.Millisecond)
+		}
+
+		// 添加间隔（最后一个不需要等待）
+		if created < targetSize {
+			time.Sleep(interval)
 		}
 	}
 
@@ -358,6 +403,19 @@ func (p *ConnectionPool) generateWSID() []byte {
 	buf := make([]byte, 3)
 	rand.Read(buf)
 	return buf
+}
+
+// calculateExpiresAt 计算带随机偏移的过期时间（用于错峰销毁）
+// 随机偏移范围：±30% 的 TTL，确保连接不会同时过期
+func (p *ConnectionPool) calculateExpiresAt(createdAt time.Time) time.Time {
+	ttl := p.cfg.GetConnectionTTL()
+	// 生成 -0.3 到 +0.3 的随机偏移系数
+	var randomBytes [1]byte
+	rand.Read(randomBytes[:])
+	// 将 0-255 映射到 -0.3 到 +0.3
+	offsetRatio := (float64(randomBytes[0])/255.0 - 0.5) * 0.6
+	offset := time.Duration(float64(ttl) * offsetRatio)
+	return createdAt.Add(ttl + offset)
 }
 
 // getTLSConfig 获取 TLS 配置（支持 ECH 和自动降级）
@@ -538,12 +596,13 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		relayAddr = fmt.Sprintf("%s:%d", relay.IP, relay.Port)
 	}
 
+	now := time.Now()
 	item := &ConnItem{
 		WS:           ws,
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
-		CreatedAt:    time.Now(),
-		Streams:      0,
+		CreatedAt:    now,
+		ExpiresAt:    p.calculateExpiresAt(now),
 		Traffic:      &TrafficCounter{},
 		// 初始化质量监控字段
 		QualityScore:      100, // 初始满分
@@ -553,7 +612,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		HeartbeatFailures: 0,
 		RequestFailures:   0,
 		RequestSuccesses:  0,
-		LastQualityCheck:  time.Now(),
+		LastQualityCheck:  now,
 		IsDegraded:        false,
 	}
 	item.RTT.Store(latency.Nanoseconds())
@@ -587,6 +646,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	// 将连接加入池（同步操作，确保加入成功后才返回）
 	p.mu.Lock()
+	item.inPool.Store(true)
 	p.pool = append(p.pool, item)
 	p.mu.Unlock()
 
@@ -712,12 +772,13 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		relayAddr = fmt.Sprintf("%s:%d", relay.IP, relay.Port)
 	}
 
+	now := time.Now()
 	item := &ConnItem{
 		WS:           ws,
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
-		CreatedAt:    time.Now(),
-		Streams:      0,
+		CreatedAt:    now,
+		ExpiresAt:    p.calculateExpiresAt(now),
 		Traffic:      &TrafficCounter{},
 		// 初始化质量监控字段
 		QualityScore:      100, // 初始满分
@@ -727,7 +788,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		HeartbeatFailures: 0,
 		RequestFailures:   0,
 		RequestSuccesses:  0,
-		LastQualityCheck:  time.Now(),
+		LastQualityCheck:  now,
 		IsDegraded:        false,
 	}
 	item.RTT.Store(latency.Nanoseconds())
@@ -765,6 +826,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		req.connCh <- item
 	default:
 		p.mu.Lock()
+		item.inPool.Store(true)
 		p.pool = append(p.pool, item)
 		p.mu.Unlock()
 	}
@@ -844,12 +906,13 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 	connectionID := p.generateWSID()
 	relayAddr := fmt.Sprintf("%s:%d", relay.IP, relay.Port)
 
+	now := time.Now()
 	item := &ConnItem{
 		WS:           ws,
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
-		CreatedAt:    time.Now(),
-		Streams:      0,
+		CreatedAt:    now,
+		ExpiresAt:    p.calculateExpiresAt(now),
 		Traffic:      &TrafficCounter{},
 		// 初始化质量监控字段
 		QualityScore:      100,
@@ -859,7 +922,7 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 		HeartbeatFailures: 0,
 		RequestFailures:   0,
 		RequestSuccesses:  0,
-		LastQualityCheck:  time.Now(),
+		LastQualityCheck:  now,
 		IsDegraded:        false,
 	}
 	item.RTT.Store(latency.Nanoseconds())
@@ -891,6 +954,7 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 
 	// 将连接加入池
 	p.mu.Lock()
+	item.inPool.Store(true)
 	p.pool = append(p.pool, item)
 	p.mu.Unlock()
 
@@ -931,28 +995,62 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 			connIDStr, item.RelayAddr,
 			formatBytes(sent), formatBytes(recv), streams)
 
+		// 修复死锁问题：先获取需要的数据，释放锁后再关闭 WebSocket
+		var mgrToCleanup *StreamManager
+		var wasInPool bool
+		var wasActive bool
+
 		p.mu.Lock()
-		// 从空闲池中移除
+		// 1. 尝试从空闲池中移除
 		for i, ci := range p.pool {
 			if ci == item {
 				p.pool = append(p.pool[:i], p.pool[i+1:]...)
-				atomic.AddInt64(&p.stats.ClosedConnections, 1)
+				wasInPool = true
 				break
 			}
 		}
-		// 通知 StreamManager 清理所有 stream
-		if mgr, ok := p.managerByConn[item]; ok {
-			mgr.HandleConnectionClose()
+
+		// 2. 检查是否在活跃连接中（managerByConn）
+		if mgr, exists := p.managerByConn[item]; exists {
+			mgrToCleanup = mgr
 			delete(p.managerByConn, item)
+			// 如果不在空闲池中，说明是活跃连接，需要递减 activeConnections
+			if !wasInPool {
+				wasActive = true
+			}
 		}
+
 		delete(p.pendingHeartbeats, connIDStr)
+		// 清理亲和性分数，防止内存泄漏
+		delete(p.connAffinityScore, item)
+		// 清理会话轮换器中的排空记录，防止内存泄漏
+		if p.sessionRotator != nil {
+			p.sessionRotator.RemoveConnection(item)
+		}
+		atomic.AddInt64(&p.stats.ClosedConnections, 1)
 		p.mu.Unlock()
 
-		// 静默关闭 WebSocket（忽略 "already closed" 错误）
+		// 递减活跃连接计数（在锁外操作）
+		if wasActive {
+			atomic.AddInt32(&p.activeConnections, -1)
+		}
+
+		// 在锁外进行清理操作，避免阻塞其他操作
+		if mgrToCleanup != nil {
+			mgrToCleanup.HandleConnectionClose()
+		}
+
+		// 最后关闭 WebSocket（在锁外，避免阻塞）
 		ws.Close() // nolint:errcheck
 	}()
 
 	for {
+		// 检查是否正在关闭（防止处理已关闭的连接）
+		if item.closing.Load() {
+			p.log.Debug("连接 [%s] 正在关闭，退出消息循环", formatConnID(item.ConnectionID))
+			return
+		}
+
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			return
@@ -1004,52 +1102,73 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 		activeCount := int(atomic.LoadInt32(&p.activeConnections))
 		pendingCount := int(atomic.LoadInt32(&p.pendingConnections))
 
-		// 1. 检查空闲池
+		// 1. 检查空闲池（从头部取，头部是最高质量/最低RTT）
 		for len(p.pool) > 0 {
-			item := p.pool[len(p.pool)-1]
-			p.pool = p.pool[:len(p.pool)-1]
+			item := p.pool[0]
+			p.pool = p.pool[1:]
 
-			if item.WS != nil {
-				// 获取或创建 StreamManager
-				mgr, ok := p.managerByConn[item]
-				if !ok {
-					mgr = NewStreamManager(
-						item,
-						maxStreams,
-						p.cfg.GetDefaultWindowSize(),
-						p.cfg.GetMinWindowSize(),
-						p.cfg.GetMaxWindowSize(),
-						p.cfg.GetWindowTimeout(),
-					)
-					p.managerByConn[item] = mgr
-				}
+			// 标记连接已从空闲池取出
+			item.inPool.Store(false)
 
-				// 尝试立即分配流
-				streamID, allocated := mgr.tryAllocateStream(targetAddr)
-				if allocated {
-					atomic.AddInt32(&p.activeConnections, 1)
-					p.mu.Unlock()
-
-					p.log.Debug("获取连接+流: [%s] Stream[%02x] -> %s (空闲连接)",
-						formatConnID(item.ConnectionID), streamID, targetAddr)
-					return item, streamID, nil
-				}
-				// 分配失败，连接已满
-				// 放回池的最前面（下次优先使用）
-				p.pool = append([]*ConnItem{item}, p.pool...)
+			if item.WS == nil {
+				continue
 			}
+
+			// 检查连接是否正在关闭（防止使用已关闭的连接）
+			if item.closing.Load() {
+				p.log.Debug("跳过正在关闭的连接: [%s]", formatConnID(item.ConnectionID))
+				continue
+			}
+
+			// 检查连接是否正在排空（会话轮换）
+			if p.sessionRotator != nil && !p.sessionRotator.ShouldUseConnection(item) {
+				p.log.Debug("跳过排空状态的连接: [%s]", formatConnID(item.ConnectionID))
+				continue
+			}
+
+			// 获取或创建 StreamManager
+			mgr, ok := p.managerByConn[item]
+			if !ok {
+				mgr = NewStreamManager(
+					item,
+					maxStreams,
+					p.cfg.GetDefaultWindowSize(),
+					p.cfg.GetMinWindowSize(),
+					p.cfg.GetMaxWindowSize(),
+					p.cfg.GetWindowTimeout(),
+				)
+				p.managerByConn[item] = mgr
+			}
+
+			// 尝试立即分配流
+			streamID, allocated := mgr.tryAllocateStream(targetAddr)
+			if allocated {
+				atomic.AddInt32(&p.activeConnections, 1)
+				p.mu.Unlock()
+
+				p.log.Debug("获取连接+流: [%s] Stream[%02x] -> %s (空闲连接, RTT:%dms)",
+					formatConnID(item.ConnectionID), streamID, targetAddr,
+					time.Duration(item.RTT.Load()).Milliseconds())
+				return item, streamID, nil
+			}
+			// 分配失败，连接已满，放回池的末尾
+			item.inPool.Store(true)
+			p.pool = append(p.pool, item)
 		}
 
 		// 2. 检查亲和性连接
 		if targetAddr != "" && p.cfg.EnableMultiplex {
 			if affinityConn, exists := p.targetToConn[targetAddr]; exists {
-				if mgr, ok := p.managerByConn[affinityConn]; ok && affinityConn.WS != nil {
-					streamID, allocated := mgr.tryAllocateStream(targetAddr)
-					if allocated {
-						p.mu.Unlock()
-						p.log.Debug("获取连接+流: [%s] Stream[%02x] -> %s (亲和连接)",
-							formatConnID(affinityConn.ConnectionID), streamID, targetAddr)
-						return affinityConn, streamID, nil
+				// 检查连接是否正在关闭
+				if !affinityConn.closing.Load() {
+					if mgr, ok := p.managerByConn[affinityConn]; ok && affinityConn.WS != nil {
+						streamID, allocated := mgr.tryAllocateStream(targetAddr)
+						if allocated {
+							p.mu.Unlock()
+							p.log.Debug("获取连接+流: [%s] Stream[%02x] -> %s (亲和连接)",
+								formatConnID(affinityConn.ConnectionID), streamID, targetAddr)
+							return affinityConn, streamID, nil
+						}
 					}
 				}
 			}
@@ -1059,7 +1178,7 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 		if p.cfg.EnableMultiplex {
 			minStreams := maxStreams + 1
 			for item, mgr := range p.managerByConn {
-				if item.WS == nil {
+				if item.WS == nil || item.closing.Load() {
 					continue
 				}
 				streamCount := mgr.GetStreamCount()
@@ -1176,6 +1295,12 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 				continue
 			}
 
+			// 检查连接是否正在排空（会话轮换）
+			if p.sessionRotator != nil && !p.sessionRotator.ShouldUseConnection(item) {
+				p.log.Debug("跳过排空状态的连接: [%s]", formatConnID(item.ConnectionID))
+				continue
+			}
+
 			// 检查连接质量评分
 			qualityScore := atomic.LoadInt64(&item.QualityScore)
 			if qualityScore < 40 {
@@ -1241,9 +1366,15 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 		atomic.AddInt32(&p.activeConnections, 1)
 	}
 
+	// 把低质量连接放回空闲池末尾（让 messageLoop defer 正确处理）
+	for _, conn := range lowQualityConns {
+		conn.inPool.Store(true)
+		p.pool = append(p.pool, conn)
+	}
+
 	p.mu.Unlock()
 
-	// 释放锁后，批量关闭低质量连接（避免死锁）
+	// 释放锁后，关闭低质量连接（会触发 messageLoop defer 清理）
 	for _, conn := range lowQualityConns {
 		conn.WS.Close()
 	}
@@ -1296,14 +1427,22 @@ func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// 通过 StreamManager 检查活跃 stream 数量
+	// 检查连接是否已经被关闭（managerByConn 已被 messageLoop defer 删除）
 	mgr, hasManager := p.managerByConn[item]
-	streamCount := 0
-	if hasManager {
-		streamCount = mgr.GetStreamCount()
+	if !hasManager {
+		// 连接已经被关闭，不需要处理
+		return
 	}
 
+	streamCount := mgr.GetStreamCount()
+
 	if streamCount == 0 {
+		// 使用 CAS 操作防止重复放入空闲池
+		// 如果 inPool 已经是 true，说明连接已经在空闲池中，直接返回
+		if !item.inPool.CompareAndSwap(false, true) {
+			return
+		}
+
 		// 没有活跃的 stream，放回池中以供重用
 		// 注意：不删除 managerByConn 条目，因为 messageLoop 需要它来分发消息
 		// 连接会在关闭时由 messageLoop 的 defer 函数清理
@@ -1328,6 +1467,59 @@ func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 	// 如果还有活跃的 stream，连接保持活跃状态，直到最后一个释放
 }
 
+// ============================================================================
+// 亲和性分数管理
+// ============================================================================
+
+// UpdateAffinityScore 更新亲和分数
+// success: true 表示成功，false 表示失败
+func (p *ConnectionPool) UpdateAffinityScore(conn *ConnItem, targetAddr string, success bool) {
+	if targetAddr == "" {
+		return
+	}
+
+	p.affinityMu.Lock()
+	defer p.affinityMu.Unlock()
+
+	if p.connAffinityScore == nil {
+		p.connAffinityScore = make(map[*ConnItem]map[string]int64)
+	}
+
+	if p.connAffinityScore[conn] == nil {
+		p.connAffinityScore[conn] = make(map[string]int64)
+	}
+
+	if success {
+		p.connAffinityScore[conn][targetAddr] += 10
+	} else {
+		p.connAffinityScore[conn][targetAddr] -= 50
+		// 负分数重置为 0
+		if p.connAffinityScore[conn][targetAddr] < 0 {
+			p.connAffinityScore[conn][targetAddr] = 0
+		}
+	}
+}
+
+// GetAffinityScore 获取连接对目标的亲和分数
+func (p *ConnectionPool) GetAffinityScore(conn *ConnItem, targetAddr string) int64 {
+	if targetAddr == "" {
+		return 0
+	}
+
+	p.affinityMu.RLock()
+	defer p.affinityMu.RUnlock()
+
+	if p.connAffinityScore == nil {
+		return 0
+	}
+
+	if p.connAffinityScore[conn] == nil {
+		return 0
+	}
+
+	return p.connAffinityScore[conn][targetAddr]
+}
+
 // GetAllActiveConnections 获取所有活跃连接（包括空闲和正在使用的）
 // 用于 metrics 暴露和流量统计
 func (p *ConnectionPool) GetAllActiveConnections() []*ConnItem {
@@ -1340,11 +1532,15 @@ func (p *ConnectionPool) GetAllActiveConnections() []*ConnItem {
 	}
 	p.mu.RUnlock()
 
-	// 在锁外进行去重（使用 map 来去重）
+	// 在锁外进行去重和过滤（使用 map 来去重）
 	seen := make(map[*ConnItem]struct{}, len(result))
 	unique := make([]*ConnItem, 0, len(result))
 	for _, conn := range result {
 		if _, exists := seen[conn]; !exists {
+			// 过滤掉已关闭的连接
+			if conn.closing.Load() {
+				continue
+			}
 			seen[conn] = struct{}{}
 			unique = append(unique, conn)
 		}
@@ -1454,9 +1650,38 @@ func (p *ConnectionPool) maintainPool() {
 	currentSize := len(p.pool) + int(atomic.LoadInt32(&p.activeConnections)) +
 		int(atomic.LoadInt32(&p.pendingConnections))
 
+	// 优先保证最小连接数（不管负载率如何）
 	if currentSize < int(p.currentMinPoolSize) {
 		p.createConnection("维护补给")
 		return
+	}
+
+	// 多路复用模式下：根据实际负载率决定是否需要额外扩容
+	if p.cfg.EnableMultiplex {
+		p.mu.RLock()
+		totalStreams := 0
+		maxStreams := int(p.cfg.MaxStreamsPerConnection)
+
+		for item, mgr := range p.managerByConn {
+			if item.WS == nil {
+				continue
+			}
+			totalStreams += mgr.GetStreamCount()
+		}
+		p.mu.RUnlock()
+
+		// 计算当前负载率（基于总容量）
+		totalCapacity := currentSize * maxStreams
+		var currentLoad float64
+		if totalCapacity > 0 {
+			currentLoad = float64(totalStreams) / float64(totalCapacity)
+		}
+
+		// 负载率低于阈值时，不需要额外扩容
+		lowThreshold := p.cfg.DynamicPoolLowThreshold // 默认 0.3
+		if currentLoad < lowThreshold {
+			return
+		}
 	}
 
 	if currentSize >= p.cfg.MaxPoolSize {
@@ -1477,10 +1702,6 @@ func (p *ConnectionPool) maintainPool() {
 		totalStreams := 0
 		activeConnCount := 0
 		maxStreams := int(p.cfg.MaxStreamsPerConnection)
-		hasHighLoadConn := false // 是否有高负载连接
-
-		// 流数阈值：maxStreams 的 60%，超过此值认为连接负载较高
-		streamThreshold := max(int(float64(maxStreams)*0.6), 1)
 
 		for item, mgr := range p.managerByConn {
 			if item.WS == nil {
@@ -1489,25 +1710,87 @@ func (p *ConnectionPool) maintainPool() {
 			streamCount := mgr.GetStreamCount()
 			totalStreams += streamCount
 			activeConnCount++
-
-			// 只要有一个连接达到或超过阈值，就标记为高负载
-			if streamCount >= streamThreshold {
-				hasHighLoadConn = true
-			}
 		}
 		p.mu.RUnlock()
 
-		// 当存在高负载连接时，提前扩容（避免等到 100% 才触发）
-		if activeConnCount > 0 && hasHighLoadConn {
-			needExpansion = true
-			reason = fmt.Sprintf("连接高负载(活跃:%d,总流:%d,阈值:%d)",
-				activeConnCount, totalStreams, streamThreshold)
+		// 修复：计算正确的整体负载率
+		// 负载率 = 总活跃流数 / (连接数 × 每连接最大流数)
+		if activeConnCount > 0 {
+			currentLoad := float64(totalStreams) / float64(activeConnCount*maxStreams)
+			highThreshold := p.cfg.DynamicPoolHighThreshold // 默认 0.6
+
+			if currentLoad > highThreshold {
+				needExpansion = true
+				reason = fmt.Sprintf("高负载(利用率%.1f%%: 流数=%d, 连接=%d, 最大=%d)",
+					currentLoad*100, totalStreams, activeConnCount, maxStreams)
+			}
 		}
 	}
 
 	if needExpansion {
 		p.log.Info("触发按需扩容: %s", reason)
 		p.createConnection(fmt.Sprintf("按需扩容(%s)", reason))
+	}
+
+	// 每次维护时检查并清理劣质连接
+	p.cullDegradedConnections()
+}
+
+// cullDegradedConnections 清理劣质连接
+func (p *ConnectionPool) cullDegradedConnections() {
+	connections := p.GetAllActiveConnections()
+	culled := 0
+
+	for _, conn := range connections {
+		if conn.WS == nil {
+			continue
+		}
+
+		// 检查是否已经标记为正在关闭（防止重复清理）
+		if conn.closing.Load() {
+			continue
+		}
+
+		// 检查是否正在排空（会话轮换中的连接不处理）
+		if p.sessionRotator != nil && !p.sessionRotator.ShouldUseConnection(conn) {
+			continue
+		}
+
+		score := conn.CalculateQualityScore()
+
+		if score < 30 {
+			connIDStr := formatConnID(conn.ConnectionID)
+			p.log.Warn("连接 [%s] 质量过低 (%d)，主动关闭", connIDStr, score)
+
+			// 标记为正在关闭
+			conn.closing.Store(true)
+
+			// 立即从所有数据结构中移除（防止重复使用）
+			p.mu.Lock()
+			delete(p.managerByConn, conn)
+			// 从 p.pool 中移除
+			for i, item := range p.pool {
+				if item == conn {
+					p.pool = append(p.pool[:i], p.pool[i+1:]...)
+					break
+				}
+			}
+			// 从 targetToConn 中移除相关映射
+			for target, c := range p.targetToConn {
+				if c == conn {
+					delete(p.targetToConn, target)
+				}
+			}
+			p.mu.Unlock()
+
+			// 关闭 WebSocket（会触发 messageLoop 退出）
+			conn.WS.Close()
+			culled++
+		}
+	}
+
+	if culled > 0 {
+		p.log.Info("清理了 %d 个劣质连接", culled)
 	}
 }
 
@@ -1526,7 +1809,7 @@ func (p *ConnectionPool) cullLoop() {
 	}
 }
 
-// cullOldConnections 清理过期连接
+// cullOldConnections 清理过期连接（平滑销毁：每次只清理一个）
 func (p *ConnectionPool) cullOldConnections() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1539,23 +1822,18 @@ func (p *ConnectionPool) cullOldConnections() {
 	now := time.Now()
 	keepMin := min(p.cfg.MinPoolSize, int(p.currentMinPoolSize))
 
-	newPool := make([]*ConnItem, 0, beforeSize)
-	removed := 0
-
-	// 按创建时间排序
-	for _, item := range p.pool {
-		if removed < beforeSize-keepMin && now.Sub(item.CreatedAt) > p.cfg.GetConnectionTTL() {
+	// 平滑销毁：每次只清理一个过期连接，避免批量清理导致连接池突然变空
+	for i, item := range p.pool {
+		// 使用 ExpiresAt 判断是否过期（带随机偏移，实现错峰销毁）
+		if beforeSize-1 >= keepMin && now.After(item.ExpiresAt) {
+			// 从池中移除
+			p.pool = append(p.pool[:i], p.pool[i+1:]...)
 			item.WS.Close()
 			atomic.AddInt64(&p.stats.ClosedConnections, 1)
-			removed++
-		} else {
-			newPool = append(newPool, item)
+			p.log.Debug("清理过期连接: [%s] 已过期 %v",
+				formatConnID(item.ConnectionID), now.Sub(item.ExpiresAt))
+			return // 每次只清理一个
 		}
-	}
-
-	p.pool = newPool
-	if removed > 0 {
-		p.log.Debug("清理过期连接: 清除%d个 (%d -> %d)", removed, beforeSize, len(p.pool))
 	}
 }
 
@@ -1759,9 +2037,36 @@ func (p *ConnectionPool) adjustPoolSize() {
 		return
 	}
 
-	activeRatio := float64(active) / float64(total)
+	var utilizationRatio float64
+	var activeRatio float64
 	queued := len(p.requestQueue)
-	utilizationRatio := float64(active+queued) / float64(total+queued)
+
+	// 多路复用模式下：计算流级别的利用率
+	if p.cfg.EnableMultiplex {
+		totalStreams := 0
+		maxStreams := int(p.cfg.MaxStreamsPerConnection)
+
+		p.mu.RLock()
+		// 统计所有活跃连接的流数
+		for conn := range p.managerByConn {
+			conn.mu.Lock()
+			totalStreams += int(conn.Streams.Load())
+			conn.mu.Unlock()
+		}
+		p.mu.RUnlock()
+
+		// 流级别利用率 = 总流数 / (总连接数 × 每连接最大流数)
+		totalCapacity := total * maxStreams
+		if totalCapacity > 0 {
+			utilizationRatio = float64(totalStreams+queued) / float64(totalCapacity)
+		}
+		// 活跃率 = 有流的连接数 / 总连接数
+		activeRatio = float64(active) / float64(total)
+	} else {
+		// 非多路复用模式：使用连接级别的利用率
+		activeRatio = float64(active) / float64(total)
+		utilizationRatio = float64(active+queued) / float64(total+queued)
+	}
 
 	newSize := int(p.currentMinPoolSize)
 	var reason string
@@ -1928,6 +2233,11 @@ func (p *ConnectionPool) GetStats() *PoolStats {
 func (p *ConnectionPool) Close() {
 	close(p.stopChan)
 
+	// 停止会话轮换器
+	if p.sessionRotator != nil {
+		p.sessionRotator.Stop()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -1988,8 +2298,11 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 	p.mu.RLock()
 	result := make([]ConnectionData, 0, len(p.pool)+len(p.managerByConn))
 
-	// 从空闲池获取连接
+	// 从空闲池获取连接（过滤 closing 状态）
 	for _, conn := range p.pool {
+		if conn.closing.Load() {
+			continue
+		}
 		sent, recv, _ := conn.Traffic.GetSnapshot()
 		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
 		result = append(result, ConnectionData{
@@ -2008,8 +2321,11 @@ func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 		})
 	}
 
-	// 从 managerByConn 获取连接及其 stream 计数
+	// 从 managerByConn 获取连接及其 stream 计数（过滤 closing 状态）
 	for conn, mgr := range p.managerByConn {
+		if conn.closing.Load() {
+			continue
+		}
 		sent, recv, _ := conn.Traffic.GetSnapshot()
 		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
 		result = append(result, ConnectionData{

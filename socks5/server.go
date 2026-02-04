@@ -278,6 +278,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 		s.log.Error("发送 CONNECT 消息失败: %v", err)
 		// 记录请求失败
 		connItem.RecordFailure()
+		// 更新亲和分数（失败）
+		s.pool.UpdateAffinityScore(connItem, targetAddr, false)
 		if s.cfg.EnableStats {
 			s.pool.RecordRequestFailure()
 		}
@@ -338,6 +340,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 					connItem.Traffic.IncStream()
 					// 记录请求成功
 					connItem.RecordSuccess()
+					// 更新亲和分数（成功）
+					s.pool.UpdateAffinityScore(connItem, targetAddr, true)
 					if s.cfg.EnableStats {
 						s.pool.RecordRequestSuccess(requestStartTime)
 					}
@@ -365,6 +369,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 				} else if msg.Type == protocol.MsgTypeClose {
 					// 连接建立前收到 CLOSE，记录失败
 					connItem.RecordFailure()
+					// 更新亲和分数（失败）
+					s.pool.UpdateAffinityScore(connItem, targetAddr, false)
 					if s.cfg.EnableStats {
 						s.pool.RecordRequestFailure()
 					}

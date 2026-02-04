@@ -26,6 +26,17 @@ type EchManager struct {
 	refreshInterval time.Duration                // 定时刷新间隔
 	stopChan        chan struct{}                // 停止信号
 	log             *logger.Logger
+
+	// singleFlight 防止缓存击穿
+	flightMu   sync.Mutex           // 保护 flightMap
+	flightMap  map[string]*flight  // 正在进行的查询
+}
+
+// flight 代表一个正在进行的 ECH 配置查询
+type flight struct {
+	wg    sync.WaitGroup
+	value []byte
+	err   error
 }
 
 // NewEchManager 创建 ECH 管理器
@@ -43,15 +54,16 @@ func NewEchManager(dohClient *dns.DoHClient, echDomain string, cacheTTL time.Dur
 	}
 
 	return &EchManager{
-		cache:     make(map[string]*cacheEntry),
-		echDomain: echDomain,
-		dohFunc: func(domain string) ([]byte, error) {
+		cache:           make(map[string]*cacheEntry),
+		echDomain:       echDomain,
+		dohFunc:         func(domain string) ([]byte, error) {
 			return dohClient.GetECHConfig(domain)
 		},
 		cacheTTL:        cacheTTL,
 		refreshInterval: refreshInterval,
 		stopChan:        make(chan struct{}),
 		log:             logger.GetLogger("ECH"),
+		flightMap:        make(map[string]*flight),
 	}
 }
 
@@ -84,26 +96,75 @@ func (em *EchManager) GetTlsConfig(domain string, useEch bool) (*tls.Config, err
 	return tlsConfig, nil
 }
 
-// getECHConfig 获取 ECH 配置（带缓存）
+// getECHConfig 获取 ECH 配置（带缓存和 singleFlight 防止击穿）
 // domain 参数保留用于日志，实际查询使用 em.echDomain
 func (em *EchManager) getECHConfig(domain string) ([]byte, error) {
 	// 使用 echDomain 作为缓存键
 	cacheKey := em.echDomain
 
-	// 先尝试从缓存读取
+	// 先尝试从缓存读取（快速路径，不加锁）
 	em.mu.RLock()
 	entry, exists := em.cache[cacheKey]
 	em.mu.RUnlock()
 
 	// 缓存命中且未过期
 	if exists && time.Now().Before(entry.expiresAt) {
-		em.log.Debug("ECH 缓存命中: %s (查询域名: %s)", cacheKey, domain)
+		// 静默返回，不输出日志（避免大量重复日志）
 		return entry.echConfig, nil
 	}
 
-	// 缓存未命中或已过期，需要查询
-	em.log.Debug("ECH 缓存未命中或已过期: %s，开始查询", cacheKey)
-	return em.fetchAndCache(cacheKey)
+	// 缓存未命中或已过期，使用 singleFlight 模式
+	em.flightMu.Lock()
+
+	// 双重检查：可能在等待 flightMu 时缓存已被其他 goroutine 填充
+	em.mu.RLock()
+	entry, exists = em.cache[cacheKey]
+	em.mu.RUnlock()
+
+	if exists && time.Now().Before(entry.expiresAt) {
+		em.flightMu.Unlock()
+		return entry.echConfig, nil
+	}
+
+	// 检查是否已有查询在进行中
+	if flight, inFlight := em.flightMap[cacheKey]; inFlight {
+		em.flightMu.Unlock()
+		em.log.Debug("等待其他 goroutine 获取 ECH 配置: %s", cacheKey)
+		flight.wg.Wait()
+		// 等待完成后，缓存应该已经被填充
+		if flight.err != nil {
+			return nil, flight.err
+		}
+		// 再次检查缓存
+		em.mu.RLock()
+		entry = em.cache[cacheKey]
+		em.mu.RUnlock()
+		if entry != nil && time.Now().Before(entry.expiresAt) {
+			return entry.echConfig, nil
+		}
+		return nil, fmt.Errorf("ECH 配置获取失败: %v", flight.err)
+	}
+
+	// 创建新的 flight
+	flight := &flight{}
+	flight.wg.Add(1)
+	em.flightMap[cacheKey] = flight
+	em.flightMu.Unlock()
+
+	// 执行查询（在 flightMu 外，允许并发查询不同的 key）
+	result, err := em.fetchAndCache(cacheKey)
+
+	// 通知等待的 goroutine
+	flight.value = result
+	flight.err = err
+	flight.wg.Done()
+
+	// 清理 flight
+	em.flightMu.Lock()
+	delete(em.flightMap, cacheKey)
+	em.flightMu.Unlock()
+
+	return result, err
 }
 
 // fetchAndCache 从 DoH 查询 ECH 配置并缓存

@@ -181,6 +181,34 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_pool_queued gauge")
 	lines = append(lines, fmt.Sprintf("gcm_pool_queued %d", poolStats.QueuedRequests))
 
+	// 获取连接数据用于计算负载率
+	s.log.Debug("[METRICS] 获取 active connections...")
+	connData := s.pool.GetConnectionsData()
+	s.log.Debug("[METRICS] 获取到 %d 个连接", len(connData))
+
+	// 计算负载率（多路复用模式下）
+	var loadRate float64
+	if s.cfg.EnableMultiplex && len(connData) > 0 {
+		totalStreams := 0
+		for _, cd := range connData {
+			totalStreams += cd.StreamCount
+		}
+		totalCapacity := len(connData) * int(s.cfg.MaxStreamsPerConnection)
+		if totalCapacity > 0 {
+			loadRate = float64(totalStreams) / float64(totalCapacity) * 100
+		}
+	} else if poolStats.ActiveConnections > 0 {
+		// 非多路复用模式：活跃连接数/总连接数
+		total := poolStats.PoolSize + poolStats.ActiveConnections
+		if total > 0 {
+			loadRate = float64(poolStats.ActiveConnections) / float64(total) * 100
+		}
+	}
+
+	lines = append(lines, "# HELP gcm_pool_load_rate 连接池负载率(%)")
+	lines = append(lines, "# TYPE gcm_pool_load_rate gauge")
+	lines = append(lines, fmt.Sprintf("gcm_pool_load_rate %.2f", loadRate))
+
 	// 请求统计指标
 	lines = append(lines, "# HELP gcm_requests_total 总请求数")
 	lines = append(lines, "# TYPE gcm_requests_total counter")
@@ -228,11 +256,7 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# HELP gcm_conn_rtt 单个 WebSocket 连接的 RTT 延迟(毫秒)")
 	lines = append(lines, "# TYPE gcm_conn_rtt gauge")
 
-	// Per-connection 流量数据（使用优化的方法获取连接数据）
-	s.log.Debug("[METRICS] 获取 active connections...")
-	connData := s.pool.GetConnectionsData()
-	s.log.Debug("[METRICS] 获取到 %d 个连接", len(connData))
-
+	// Per-connection 流量数据（connData 已在前面获取）
 	for _, cd := range connData {
 		wsID := formatConnID(cd.ConnectionID)
 		sent, recv := cd.Sent, cd.Recv
@@ -290,9 +314,8 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_pool_closed_total counter")
 	lines = append(lines, fmt.Sprintf("gcm_pool_closed_total %d", poolStats.ClosedConnections))
 
-	// 全局速率统计（聚合所有连接）
+	// 全局速率统计（复用之前获取的 connData）
 	var totalSendAvg, totalSendMax, totalRecvAvg, totalRecvMax float64
-	connData = s.pool.GetConnectionsData()
 	if len(connData) > 0 {
 		// 计算所有连接的平均速率的平均值，以及最大速率的最大值
 		var sumSendAvg, sumRecvAvg float64
@@ -359,6 +382,10 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_relay_nodes_total gauge")
 	lines = append(lines, fmt.Sprintf("gcm_relay_nodes_total %d", relayStats.TotalNodes))
 
+	lines = append(lines, "# HELP gcm_relay_nodes_optimal 有效中转节点数")
+	lines = append(lines, "# TYPE gcm_relay_nodes_optimal gauge")
+	lines = append(lines, fmt.Sprintf("gcm_relay_nodes_optimal %d", relayStats.OptimalNodes))
+
 	lines = append(lines, "# HELP gcm_relay_latency_avg 中转节点平均延迟(毫秒)")
 	lines = append(lines, "# TYPE gcm_relay_latency_avg gauge")
 	lines = append(lines, fmt.Sprintf("gcm_relay_latency_avg %d", relayStats.AvgLatency.Milliseconds()))
@@ -379,25 +406,46 @@ func (s *Server) generateMetrics() string {
 	lines = append(lines, "# TYPE gcm_relay_removed_nodes counter")
 	lines = append(lines, fmt.Sprintf("gcm_relay_removed_nodes %d", relayStats.Removed))
 
-	// 负载均衡指标 - 节点级别详细信息
+	// 负载均衡指标 - 节点级别详细信息（带超时保护）
 	s.log.Debug("[METRICS] 获取节点详细信息...")
-	detailedNodes := s.relayManager.GetDetailedNodes()
+	type detailedResult struct {
+		nodes []relay.DetailedNodeInfo
+	}
+	detailedChan := make(chan detailedResult, 1)
+	detailedDone := make(chan struct{})
 
-	lines = append(lines, "# HELP gcm_relay_active_connections 节点当前活跃连接数")
-	lines = append(lines, "# TYPE gcm_relay_active_connections gauge")
-	lines = append(lines, "# HELP gcm_relay_total_connections 节点累计创建连接数")
-	lines = append(lines, "# TYPE gcm_relay_total_connections counter")
-	lines = append(lines, "# HELP gcm_relay_quality_score 节点平均质量评分(0-100)")
-	lines = append(lines, "# TYPE gcm_relay_quality_score gauge")
-	lines = append(lines, "# HELP gcm_relay_weight 节点动态权重")
-	lines = append(lines, "# TYPE gcm_relay_weight gauge")
+	go func() {
+		detailedChan <- detailedResult{nodes: s.relayManager.GetDetailedNodes()}
+	}()
 
-	for _, node := range detailedNodes {
-		relayLabel := fmt.Sprintf("%s:%d", node.IP, node.Port)
-		lines = append(lines, fmt.Sprintf(`gcm_relay_active_connections{relay="%s"} %d`, relayLabel, node.ActiveConnections))
-		lines = append(lines, fmt.Sprintf(`gcm_relay_total_connections{relay="%s"} %d`, relayLabel, node.TotalConnections))
-		lines = append(lines, fmt.Sprintf(`gcm_relay_quality_score{relay="%s"} %.2f`, relayLabel, node.AvgQualityScore))
-		lines = append(lines, fmt.Sprintf(`gcm_relay_weight{relay="%s"} %.2f`, relayLabel, node.Weight))
+	detailedNodes := []relay.DetailedNodeInfo{}
+	select {
+	case res := <-detailedChan:
+		detailedNodes = res.nodes
+		close(detailedDone)
+	case <-time.After(500 * time.Millisecond):
+		s.log.Warn("[METRICS] 节点详细信息获取超时 (>500ms)，跳过详细指标")
+		close(detailedDone)
+		// 使用空切片继续
+	}
+
+	if len(detailedNodes) > 0 {
+		lines = append(lines, "# HELP gcm_relay_active_connections 节点当前活跃连接数")
+		lines = append(lines, "# TYPE gcm_relay_active_connections gauge")
+		lines = append(lines, "# HELP gcm_relay_total_connections 节点累计创建连接数")
+		lines = append(lines, "# TYPE gcm_relay_total_connections counter")
+		lines = append(lines, "# HELP gcm_relay_quality_score 节点平均质量评分(0-100)")
+		lines = append(lines, "# TYPE gcm_relay_quality_score gauge")
+		lines = append(lines, "# HELP gcm_relay_weight 节点动态权重")
+		lines = append(lines, "# TYPE gcm_relay_weight gauge")
+
+		for _, node := range detailedNodes {
+			relayLabel := fmt.Sprintf("%s:%d", node.IP, node.Port)
+			lines = append(lines, fmt.Sprintf(`gcm_relay_active_connections{relay="%s"} %d`, relayLabel, node.ActiveConnections))
+			lines = append(lines, fmt.Sprintf(`gcm_relay_total_connections{relay="%s"} %d`, relayLabel, node.TotalConnections))
+			lines = append(lines, fmt.Sprintf(`gcm_relay_quality_score{relay="%s"} %.2f`, relayLabel, node.AvgQualityScore))
+			lines = append(lines, fmt.Sprintf(`gcm_relay_weight{relay="%s"} %.2f`, relayLabel, node.Weight))
+		}
 	}
 
 	// 运行时间
