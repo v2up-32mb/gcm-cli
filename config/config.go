@@ -1,3 +1,6 @@
+// Package config 提供 GCM 代理客户端的配置管理功能，
+// 包括配置结构体定义、命令行参数解析，
+// 以及配置文件加载（支持 YAML 和 JSON 格式）。
 package config
 
 import (
@@ -8,7 +11,7 @@ import (
 	"time"
 )
 
-// LogLevel 日志级别类型
+// LogLevel 表示日志消息的严重程度级别。
 type LogLevel int
 
 const (
@@ -64,7 +67,9 @@ func (l *LogLevel) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ParseLogLevel 解析日志级别字符串
+// ParseLogLevel 解析日志级别字符串并返回对应的 LogLevel 常量。
+// 解析不区分大小写。如果字符串不匹配任何已知级别，
+// 则返回 INFO 作为默认值。
 func ParseLogLevel(s string) LogLevel {
 	switch strings.ToUpper(s) {
 	case "DEBUG":
@@ -80,7 +85,8 @@ func ParseLogLevel(s string) LogLevel {
 	}
 }
 
-// yamlDuration 是 time.Duration 的包装器，支持 YAML 中的字符串格式
+// yamlDuration 是 time.Duration 的包装器，支持从 YAML 配置中解析时间值。
+// 它接受字符串格式（如 "5m"、"1s"）和数字格式（JSON 中使用的毫秒数）。
 type yamlDuration struct {
 	time.Duration
 }
@@ -118,7 +124,9 @@ func (yd *yamlDuration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
-// yamlByteSize 是字节大小的包装器，支持 YAML 中的字符串格式（如 "256KB", "1MB"）
+// yamlByteSize 是 int64 字节计数的包装器，支持从 YAML 配置中解析
+// 人类可读的字节大小字符串（如 "256KB"、"1MB"）。
+// 支持的单位：B、KB、MB、GB。
 type yamlByteSize struct {
 	Bytes int64
 }
@@ -156,7 +164,9 @@ func (yb *yamlByteSize) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
-// parseByteSize 解析字节大小字符串（如 "256KB", "1MB"）
+// parseByteSize 将人类可读的字节大小字符串解析为 int64 字节计数。
+// 支持的格式包括："1024"、"1KB"、"1.5MB"、"2GB"。
+// 解析不区分大小写。
 func parseByteSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
 
@@ -197,7 +207,8 @@ func parseByteSize(s string) (int64, error) {
 	return int64(result), nil
 }
 
-// formatBytes 格式化字节大小为可读字符串
+// formatBytes 将 int64 字节计数格式化为人类可读的字符串并带单位。
+// 例如：1024 -> "1KB"，1536000 -> "1.5MB"。
 func formatBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -215,7 +226,21 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.0f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// Config 应用配置
+// Config 表示 GCM 代理客户端的应用配置。
+//
+// 字段按功能分组：
+//   - 基本配置：Worker 地址、监听地址、日志级别
+//   - 连接池配置：连接数、TTL、超时
+//   - 会话轮换配置：应对 Cloudflare Worker 的 110 秒时长限制
+//   - 中转节点配置：节点列表、监控、健康检查
+//   - DNS 缓存配置：DoH、缓存 TTL、预热
+//   - ECH 配置：TLS Encrypted Client Hello 支持
+//   - 心跳保活配置：连接健康检查
+//   - Metrics 配置：Prometheus 监控端点
+//   - 多路复用配置：Stream 并发控制
+//   - 窗口流控配置：接收/发送窗口大小
+//   - 拥塞控制配置：动态窗口调整
+//   - 连接质量监控配置：质量评分和节点切换
 type Config struct {
 	// 基本配置
 	WorkerHost    string   `yaml:"workerHost" json:"workerHost"`

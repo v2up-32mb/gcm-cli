@@ -9,7 +9,21 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// DefineFlags 定义所有命令行参数
+// DefineFlags 返回所有命令行参数定义。
+//
+// 返回的参数按功能分类：
+//   - 配置文件：指定配置文件路径
+//   - 基本配置：Worker 地址、监听地址、日志级别
+//   - DNS 配置：DoH 服务、缓存、预热
+//   - 中转节点配置：节点列表、连接池大小
+//   - Metrics 配置：监控端点开关和端口
+//   - 连接池配置：预热、重连、动态调整
+//   - 日志配置：日志文件输出
+//   - 隧道配置：超时、多路复用
+//   - 高级时间配置：连接 TTL、心跳等
+//   - 窗口流控配置：接收/发送窗口大小
+//   - 拥塞控制配置：动态窗口调整间隔
+//   - ECH 配置：TLS Encrypted Client Hello
 func DefineFlags() []cli.Flag {
 	return []cli.Flag{
 		// ===== 配置文件 =====
@@ -235,8 +249,11 @@ func DefineFlags() []cli.Flag {
 	}
 }
 
-// ApplyFlags 将命令行参数应用到 Config
-// urfave/cli v3 使用 context.Context 而不是 *cli.Context
+// ApplyFlags 将命令行参数应用到配置结构体。
+//
+// 该函数从命令行参数中读取值并更新 cfg。
+// 命令行参数的优先级高于配置文件。
+// urfave/cli v3 使用 context.Context 而不是 *cli.Context。
 func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	// 从 cmd 获取参数值
 	// ===== 基本配置 =====
@@ -376,7 +393,9 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	return nil
 }
 
-// flattenStringSlice 将字符串切片中的逗号分隔元素展开
+// flattenStringSlice 将字符串切片中的逗号分隔元素展开。
+//
+// 例如：["a,b", "c"] -> ["a", "b", "c"]。
 func flattenStringSlice(items []string) []string {
 	var result []string
 	for _, item := range items {
@@ -391,7 +410,7 @@ func flattenStringSlice(items []string) []string {
 	return result
 }
 
-// splitComma 按逗号分割字符串
+// splitComma 按逗号分割字符串。
 func splitComma(s string) []string {
 	return strings.Split(s, ",")
 }

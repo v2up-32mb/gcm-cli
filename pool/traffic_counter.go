@@ -6,8 +6,12 @@ import (
 	"time"
 )
 
-// TrafficCounter 原子流量计数器
-// 用于统计连接级别的上传/下载流量和 Stream 数量
+// TrafficCounter 表示原子流量计数器。
+//
+// TrafficCounter 用于统计单个 WebSocket 连接的流量和 Stream 数量，
+// 支持速率统计（平均速率和最大速率）。所有操作都是并发安全的。
+//
+// 并发安全：所有方法都使用原子操作，可以安全地在多个 goroutine 中调用。
 type TrafficCounter struct {
 	bytesSent     int64
 	bytesRecv     int64
@@ -134,15 +138,18 @@ func (c *TrafficCounter) GetRateSnapshot() (avgSent, maxSent, avgRecv, maxRecv f
 	return c.avgSendRate, c.maxSendRate, c.avgRecvRate, c.maxRecvRate
 }
 
-// ConnStats 连接统计（用于历史记录，可选）
+// ConnStats 表示连接的统计信息。
+//
+// ConnStats 用于记录单个 WebSocket 连接的历史统计数据，
+// 包括连接标识、中转节点地址、生命周期和流量统计。
 type ConnStats struct {
-	WSID        [3]byte
-	RelayAddr   string
-	CreatedAt   time.Time
-	ClosedAt    time.Time
-	BytesSent   int64
-	BytesRecv   int64
-	StreamCount int64
+	WSID        [3]byte   // WebSocket 连接 ID
+	RelayAddr   string    // 中转节点地址
+	CreatedAt   time.Time // 创建时间
+	ClosedAt    time.Time // 关闭时间
+	BytesSent   int64     // 发送字节数
+	BytesRecv   int64     // 接收字节数
+	StreamCount int64     // Stream 总数
 }
 
 // formatBytes 格式化字节数为可读格式

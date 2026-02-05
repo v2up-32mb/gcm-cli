@@ -1,3 +1,11 @@
+// Package relay 提供中转节点管理和负载均衡功能。
+//
+// 主要功能:
+//   - 中转节点解析和测速
+//   - 动态节点优选和评分
+//   - 节点健康检查和自动剔除
+//   - 负载均衡和加权轮询
+//   - 节点质量监控和统计
 package relay
 
 import (
@@ -15,24 +23,39 @@ import (
 	"gcm/logger"
 )
 
-// RelayNode 中转节点
+// RelayNode 表示中转节点信息。
+//
+// 包含节点的基本信息、延迟统计、失败计数和负载均衡相关字段。
+// 节点评分基于延迟和失败次数，分数越低表示节点越优。
 type RelayNode struct {
 	IP        string
 	Port      int
-	Source    string
-	Latency   time.Duration
-	FailCount int
-	LastCheck time.Time
-	Score     int // 分数 = 延迟(ms) + 失败惩罚
+	Source    string        // 原始配置来源（IP 或域名）
+	Latency   time.Duration // TCP 连接延迟
+	FailCount int           // 连续失败次数
+	LastCheck time.Time     // 最后一次检查时间
+	Score     int           // 分数 = 延迟(ms) + 失败惩罚(500ms/次)
 
-	// 负载均衡新增字段
+	// 负载均衡字段
 	ActiveConnections int32   // 当前活跃连接数（原子操作）
 	TotalConnections  int64   // 累计创建连接数（原子操作）
 	AvgQualityScore   float64 // 平均连接质量评分（0-100）
 	Weight            float64 // 动态权重（用于加权轮询）
 }
 
-// ParseHostPort 解析 "host:port" 或 "[ipv6]:port" 或 "host"
+// ParseHostPort 解析主机和端口字符串。
+//
+// 支持以下格式:
+//   - "host:port" - 标准格式
+//   - "[ipv6]:port" - IPv6 格式
+//   - "host" - 仅主机名（默认端口 443）
+//
+// 参数:
+//   - input: 主机和端口字符串
+//
+// 返回值:
+//   - host: 主机名或 IP 地址
+//   - port: 端口号（默认 443）
 func ParseHostPort(input string) (host string, port int) {
 	port = 443 // 默认端口
 
@@ -61,11 +84,16 @@ func ParseHostPort(input string) (host string, port int) {
 	return host, port
 }
 
-// RelayManager 中转节点管理器
+// RelayManager 表示中转节点管理器。
+//
+// RelayManager 负责管理所有中转节点，包括节点解析、测速、优选、
+// 健康检查、负载均衡等功能。支持动态节点评分和自动剔除失败节点。
+//
+// 并发安全：所有公开方法都是并发安全的。
 type RelayManager struct {
 	mu                   sync.RWMutex
 	rawRelays            []string
-	optimalRelays        []*RelayNode
+	optimalRelays        []*RelayNode // 低延迟的优选节点列表
 	allNodes             []*RelayNode // 所有已配置的节点（包括高延迟的）
 	isInitialized        bool
 	totalTestCount       int
@@ -78,7 +106,14 @@ type RelayManager struct {
 	rng                  *rand.Rand // 独立随机数生成器（避免全局状态竞争）
 }
 
-// NewRelayManager 创建中转节点管理器
+// NewRelayManager 创建并初始化中转节点管理器。
+//
+// 参数:
+//   - relayList: 中转节点列表（支持 IP、域名、带端口格式）
+//   - cfg: 配置对象
+//   - dnsCache: DNS 缓存实例
+//
+// 返回值: 初始化完成的 RelayManager 实例（需要调用 Init 方法完成节点解析和测速）。
 func NewRelayManager(relayList []string, cfg *config.Config, dnsCache *dns.DNSCache) *RelayManager {
 	return &RelayManager{
 		rawRelays: relayList,
@@ -90,7 +125,18 @@ func NewRelayManager(relayList []string, cfg *config.Config, dnsCache *dns.DNSCa
 	}
 }
 
-// Init 初始化中转节点
+// Init 初始化中转节点，执行解析、测速和优选。
+//
+// 工作流程:
+//   1. 解析所有配置的节点（IP 或域名）
+//   2. 对域名进行 DNS 解析，获取 IP 列表
+//   3. 批量测速所有候选节点
+//   4. 筛选低延迟节点作为优选节点
+//   5. 启动后台定期重评协程
+//
+// 如果未配置中转节点，将使用直连模式。
+//
+// 返回值: 初始化错误（如果发生）。
 func (rm *RelayManager) Init() error {
 	startTime := time.Now()
 
@@ -285,7 +331,13 @@ func (rm *RelayManager) resortByScore() {
 	rm.resortByScoreLocked()
 }
 
-// ReportFailure 记录失败
+// ReportFailure 报告节点连接失败。
+//
+// 记录节点的失败次数，更新评分，并在连续失败达到阈值时自动剔除节点。
+//
+// 参数:
+//   - ip: 节点 IP 地址
+//   - port: 节点端口
 func (rm *RelayManager) ReportFailure(ip string, port int) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -329,19 +381,34 @@ func (rm *RelayManager) getNextRelayLocked() *RelayNode {
 	return rm.optimalRelays[0]
 }
 
-// GetNextRelay 获取最优节点（公开版本，自动加锁）
+// GetNextRelay 获取当前最优的中转节点。
+//
+// 返回评分最低（延迟最短、失败次数最少）的节点。
+//
+// 返回值: 最优节点，如果没有可用节点则返回 nil。
 func (rm *RelayManager) GetNextRelay() *RelayNode {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 	return rm.getNextRelayLocked()
 }
 
-// GetCurrentBest 获取当前最优节点
+// GetCurrentBest 获取当前最优节点。
+//
+// 这是 GetNextRelay 的别名方法。
+//
+// 返回值: 最优节点，如果没有可用节点则返回 nil。
 func (rm *RelayManager) GetCurrentBest() *RelayNode {
 	return rm.GetNextRelay()
 }
 
-// GetBestRelayExcluding 获取最优节点（排除指定地址）
+// GetBestRelayExcluding 获取最优节点，排除指定地址。
+//
+// 遍历优选节点列表，返回第一个不匹配 excludeAddr 的节点。
+//
+// 参数:
+//   - excludeAddr: 要排除的节点地址（格式: "ip:port"）
+//
+// 返回值: 最优节点（排除指定地址后），如果所有节点都被排除则返回 nil。
 func (rm *RelayManager) GetBestRelayExcluding(excludeAddr string) *RelayNode {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
@@ -436,7 +503,12 @@ func (rm *RelayManager) batchTestLatency(nodes []*RelayNode) []*RelayNode {
 	return resultNodes
 }
 
-// ForceRescore 强制重新评分
+// ForceRescore 强制重新评分所有节点。
+//
+// 重新解析原始节点列表，执行批量测速，更新所有节点的延迟和评分。
+// 包含防抖机制，避免频繁重评。通常在连接失败时触发。
+//
+// 返回值: 如果执行了重评返回 true，如果在冷却期内跳过则返回 false。
 func (rm *RelayManager) ForceRescore() bool {
 	// 防抖检查
 	now := time.Now()
@@ -547,7 +619,9 @@ func (rm *RelayManager) logTopRelaysLocked() {
 	}
 }
 
-// GetStats 获取统计信息
+// GetStats 获取中转节点的统计信息。
+//
+// 返回值: RelayStats 包含节点数量、延迟统计等信息。
 func (rm *RelayManager) GetStats() RelayStats {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
@@ -578,12 +652,22 @@ func (rm *RelayManager) GetStats() RelayStats {
 	return stats
 }
 
-// Close 关闭管理器
+// Close 关闭中转节点管理器。
+//
+// 停止后台重评协程，释放资源。
+// 调用此方法后，RelayManager 实例不应再被使用。
 func (rm *RelayManager) Close() {
 	close(rm.stopChan)
 }
 
-// UpdateNodeLoad 更新节点负载信息（原子操作）
+// UpdateNodeLoad 更新节点的负载信息。
+//
+// 使用原子操作更新节点的活跃连接数和累计连接数。
+//
+// 参数:
+//   - ip: 节点 IP 地址
+//   - port: 节点端口
+//   - delta: 连接数变化量（+1 表示新增连接，-1 表示释放连接）
 func (rm *RelayManager) UpdateNodeLoad(ip string, port int, delta int32) {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
@@ -603,7 +687,15 @@ func (rm *RelayManager) UpdateNodeLoad(ip string, port int, delta int32) {
 	rm.log.Warn("节点 %s:%d 不在优选列表中，负载更新失败 (delta=%d)", ip, port, delta)
 }
 
-// UpdateNodeQuality 更新节点质量评分（使用 EMA 平滑）
+// UpdateNodeQuality 更新节点的质量评分。
+//
+// 使用 EMA (指数移动平均) 平滑质量评分，公式为：
+// 新评分 = 0.7 × 旧评分 + 0.3 × 新评分
+//
+// 参数:
+//   - ip: 节点 IP 地址
+//   - port: 节点端口
+//   - score: 质量评分（0-100，100 表示最佳质量）
 func (rm *RelayManager) UpdateNodeQuality(ip string, port int, score float64) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
@@ -695,7 +787,12 @@ func (rm *RelayManager) selectByWeight(candidates []*RelayNode) *RelayNode {
 	return candidates[len(candidates)-1]
 }
 
-// GetNextRelayWithLoadBalance 负载均衡选择节点
+// GetNextRelayWithLoadBalance 使用负载均衡策略选择节点。
+//
+// 从 Top 5 个优选节点中，使用加权轮询算法选择节点。
+// 权重计算考虑节点延迟、当前负载和质量评分。
+//
+// 返回值: 选中的节点，如果没有可用节点则返回 nil。
 func (rm *RelayManager) GetNextRelayWithLoadBalance() *RelayNode {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
@@ -720,28 +817,35 @@ func (rm *RelayManager) GetNextRelayWithLoadBalance() *RelayNode {
 	return selected
 }
 
-// RelayStats 中转节点统计
+// RelayStats 表示中转节点的统计信息。
 type RelayStats struct {
-	TotalNodes   int           // 所有节点数
-	OptimalNodes int           // 有效节点数（低延迟）
-	TotalTests   int
-	Removed      int
-	AvgLatency   time.Duration
-	BestLatency  time.Duration
-	WorstLatency time.Duration
+	TotalNodes   int           // 所有节点数（包括高延迟节点）
+	OptimalNodes int           // 有效节点数（低延迟节点）
+	TotalTests   int           // 累计测速次数
+	Removed      int           // 累计移除节点数
+	AvgLatency   time.Duration // 平均延迟
+	BestLatency  time.Duration // 最佳延迟
+	WorstLatency time.Duration // 最差延迟
 }
 
-// DetailedNodeInfo 节点详细信息（用于 Metrics）
+// DetailedNodeInfo 表示节点的详细信息。
+//
+// 用于 Metrics 端点暴露节点的负载和质量统计。
 type DetailedNodeInfo struct {
-	IP                string
-	Port              int
-	ActiveConnections int32
-	TotalConnections  int64
-	AvgQualityScore   float64
-	Weight            float64
+	IP                string  // 节点 IP 地址
+	Port              int     // 节点端口
+	ActiveConnections int32   // 当前活跃连接数
+	TotalConnections  int64   // 累计创建连接数
+	AvgQualityScore   float64 // 平均质量评分（0-100）
+	Weight            float64 // 动态权重
 }
 
-// GetDetailedNodes 获取所有节点的详细信息（用于 Metrics）
+// GetDetailedNodes 获取所有优选节点的详细信息。
+//
+// 返回包含负载、质量评分和权重等详细信息的节点列表，
+// 用于 Metrics 端点暴露监控数据。
+//
+// 返回值: 节点详细信息列表。
 func (rm *RelayManager) GetDetailedNodes() []DetailedNodeInfo {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()

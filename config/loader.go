@@ -13,7 +13,17 @@ import (
 
 var globalConfig *Config
 
-// LoadConfig 加载配置（主入口）
+// LoadConfig 加载配置并返回配置结构体（主入口函数）。
+//
+// 配置加载优先级（从高到低）：
+//   1. 命令行参数
+//   2. 配置文件（通过 --config 指定）
+//   3. 代码默认值
+//
+// 支持的配置文件格式：YAML (.yaml, .yml)、JSON (.json)。
+// 如果文件扩展名无法识别，会自动尝试 YAML 和 JSON 解析。
+//
+// 如果检测到 -h 或 --help 参数，会显示帮助信息并退出程序。
 func LoadConfig() (*Config, error) {
 	// 先检查是否是 help 参数
 	for _, arg := range os.Args {
@@ -72,7 +82,13 @@ func LoadConfig() (*Config, error) {
 	return globalConfig, nil
 }
 
-// LoadFile 从文件加载配置（支持 YAML 和 JSON）
+// LoadFile 从指定文件加载配置。
+//
+// 支持的文件格式：
+//   - YAML (.yaml, .yml)
+//   - JSON (.json)
+//
+// 如果文件扩展名无法识别，会自动尝试 YAML 和 JSON 解析。
 func LoadFile(filepath string) (*Config, error) {
 	data, err := os.ReadFile(filepath)
 	if err != nil {
@@ -109,7 +125,9 @@ func LoadFile(filepath string) (*Config, error) {
 	return cfg, nil
 }
 
-// getFileExt 获取文件扩展名
+// getFileExt 获取文件路径的扩展名（包括点号）。
+//
+// 例如："/path/to/config.yaml" -> ".yaml"。
 func getFileExt(filepath string) string {
 	// 手动实现，避免依赖问题
 	idx := strings.LastIndex(filepath, ".")
@@ -119,7 +137,9 @@ func getFileExt(filepath string) string {
 	return filepath[idx:]
 }
 
-// getFileDir 获取文件目录
+// getFileDir 获取文件路径所在的目录。
+//
+// 例如："/path/to/config.yaml" -> "/path/to"。
 func getFileDir(filepath string) string {
 	// 手动实现，避免依赖问题
 	idx := strings.LastIndex(filepath, "/")
@@ -132,14 +152,17 @@ func getFileDir(filepath string) string {
 	return filepath[:idx]
 }
 
-// loadFromJSON 从 JSON 数据加载配置（向后兼容）
+// loadFromJSON 从 JSON 数据加载配置（用于向后兼容）。
+//
+// 该函数使用 encoding/json 直接解析到结构体。
+// 由于保留了 json tags，可以正常工作。
 func loadFromJSON(data []byte, cfg *Config) error {
 	// 使用 encoding/json 直接解析到结构体
 	// 由于保留了 json tags，可以正常工作
 	return json.Unmarshal(data, cfg)
 }
 
-// LoadYAML 从 YAML 文件加载配置
+// LoadYAML 从 YAML 文件加载配置。
 func LoadYAML(filepath string) (*Config, error) {
 	data, err := os.ReadFile(filepath)
 	if err != nil {

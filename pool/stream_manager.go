@@ -10,26 +10,38 @@ import (
 	"gcm/protocol"
 )
 
-// 窗口流控常量
+// 窗口流控常量。
+//
+// 这些常量定义了 Stream 窗口流控的默认参数，
+// 用于防止接收端过载和实现拥塞控制。
 const (
-	DefaultWindowSize = 256 * 1024 // 默认窗口大小 256KB
-	MinWindowSize     = 32 * 1024  // 最小窗口大小 32KB
-	MaxWindowSize     = 1024 * 1024 // 最大窗口大小 1MB
+	DefaultWindowSize = 256 * 1024      // 默认窗口大小 256KB
+	MinWindowSize     = 32 * 1024       // 最小窗口大小 32KB
+	MaxWindowSize     = 1024 * 1024     // 最大窗口大小 1MB
 	WindowTimeout     = 5 * time.Second // 窗口等待超时
 )
 
-// StreamState Stream 状态枚举
+// StreamState 表示 Stream 的状态枚举。
+//
+// StreamState 定义了 Stream 的生命周期状态，
+// 遵循类似 TCP 的状态机转换规则。
 type StreamState int
 
 const (
-	StreamStateIdle StreamState = iota
-	StreamStateSynSent      // 已发送 CONNECT
-	StreamStateEstablished  // 已收到 CONNECTED
-	StreamStateFinWait      // 已发送/收到 CLOSE
-	StreamStateClosed       // 完全关闭
+	StreamStateIdle        StreamState = iota // 空闲状态
+	StreamStateSynSent                        // 已发送 CONNECT
+	StreamStateEstablished                    // 已收到 CONNECTED
+	StreamStateFinWait                        // 已发送/收到 CLOSE
+	StreamStateClosed                         // 完全关闭
 )
 
-// Stream 表示单个流的状态
+// Stream 表示单个多路复用流的状态。
+//
+// Stream 实现了类似 yamux/smux 的多路复用流，
+// 支持窗口流控、拥塞控制和状态机管理。每个 Stream
+// 对应一个 SOCKS5 隧道连接。
+//
+// 并发安全：所有公开方法都是并发安全的。
 type Stream struct {
 	ID           byte
 	TargetAddr   string
@@ -40,18 +52,18 @@ type Stream struct {
 	LastActiveAt time.Time
 
 	// 窗口流控 (借鉴 yamux 设计)
-	sendWindow    int64      // 可发送字节数（原子操作）
-	recvWindow    int64      // 可接收字节数（原子操作）
-	windowSize    int64      // 窗口大小（默认 256KB）
-	sendBlocked   chan struct{} // 发送阻塞通知
-	windowMu      sync.Mutex    // 保护窗口操作
+	sendWindow  int64         // 可发送字节数（原子操作）
+	recvWindow  int64         // 可接收字节数（原子操作）
+	windowSize  int64         // 窗口大小（默认 256KB）
+	sendBlocked chan struct{} // 发送阻塞通知
+	windowMu    sync.Mutex    // 保护窗口操作
 
 	// 拥塞控制 (借鉴 smux 设计)
-	rttHistory    [10]time.Duration // RTT 历史记录（环形缓冲区）
-	rttIndex      int               // RTT 历史索引
-	baselineRTT   time.Duration     // 基线 RTT（最小值）
-	timeoutCount  int64             // 超时次数（原子操作）
-	successCount  int64             // 成功次数（原子操作）
+	rttHistory   [10]time.Duration // RTT 历史记录（环形缓冲区）
+	rttIndex     int               // RTT 历史索引
+	baselineRTT  time.Duration     // 基线 RTT（最小值）
+	timeoutCount int64             // 超时次数（原子操作）
+	successCount int64             // 成功次数（原子操作）
 
 	// 状态机与优先级
 	state    StreamState // 当前状态
@@ -64,8 +76,15 @@ type Stream struct {
 	windowTimeout time.Duration // 窗口等待超时
 }
 
-// StreamManager 管理单个 WebSocket 连接上的所有 stream
-// 每条 WebSocket 连接对应一个 StreamManager
+// StreamManager 表示单个 WebSocket 连接的 Stream 管理器。
+//
+// StreamManager 负责管理单个 WebSocket 连接上的所有多路复用流，
+// 包括 Stream ID 分配、消息分发、窗口流控和生命周期管理。
+// 使用位图算法实现 O(1) 时间复杂度的 Stream ID 分配。
+//
+// 每条 WebSocket 连接对应一个 StreamManager 实例。
+//
+// 并发安全：所有公开方法都是并发安全的。
 type StreamManager struct {
 	conn    *ConnItem        // 所属的连接
 	max     int              // 最大 stream 数量
@@ -84,7 +103,17 @@ type StreamManager struct {
 	windowTimeout     time.Duration // 窗口等待超时
 }
 
-// NewStreamManager 创建新的 StreamManager
+// NewStreamManager 创建并初始化 StreamManager。
+//
+// 参数：
+//   - conn: 所属的 WebSocket 连接
+//   - maxStreams: 最大 Stream 数量（通常为 256）
+//   - defaultWindowSize: 默认窗口大小（字节）
+//   - minWindowSize: 最小窗口大小（字节）
+//   - maxWindowSize: 最大窗口大小（字节）
+//   - windowTimeout: 窗口等待超时时间
+//
+// 返回值：初始化完成的 StreamManager 实例。
 func NewStreamManager(conn *ConnItem, maxStreams int, defaultWindowSize, minWindowSize, maxWindowSize int64, windowTimeout time.Duration) *StreamManager {
 	return &StreamManager{
 		conn:              conn,
@@ -196,8 +225,18 @@ func (sm *StreamManager) tryAllocateStream(targetAddr string) (byte, bool) {
 	return streamID, true
 }
 
-// AllocateStream 分配一个新的 Stream ID（带超时）
-// 返回 Stream ID 和是否成功（超时返回 false）
+// AllocateStream 分配一个新的 Stream ID。
+//
+// 使用位图算法查找空闲的 Stream ID，支持超时等待。
+// 如果连接已满，会等待直到有空闲 Stream 或超时。
+//
+// 参数：
+//   - targetAddr: 目标地址（用于日志和调试）
+//   - timeout: 分配超时时间
+//
+// 返回值：
+//   - byte: 分配的 Stream ID
+//   - bool: 是否成功分配（超时返回 false）
 func (sm *StreamManager) AllocateStream(targetAddr string, timeout time.Duration) (byte, bool) {
 	deadline := time.Now().Add(timeout)
 	connIDStr := formatConnID(sm.conn.ConnectionID)
@@ -255,7 +294,14 @@ func (sm *StreamManager) AllocateStream(targetAddr string, timeout time.Duration
 	return 0, false
 }
 
-// RegisterHandler 注册 stream 的消息处理器
+// RegisterHandler 注册 Stream 的消息处理器。
+//
+// 为指定的 Stream 设置消息处理回调函数，
+// 用于处理该 Stream 接收到的消息。
+//
+// 参数：
+//   - streamID: Stream ID
+//   - handler: 消息处理器（包含 OnMessage、OnClose、OnCleanup 回调）
 func (sm *StreamManager) RegisterHandler(streamID byte, handler *StreamHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -268,8 +314,17 @@ func (sm *StreamManager) RegisterHandler(streamID byte, handler *StreamHandler) 
 	}
 }
 
-// UnregisterStream 注销一个 stream
-// 返回目标地址（用于清理亲和性映射）和是否该连接已无活跃 stream
+// UnregisterStream 注销一个 Stream。
+//
+// 从 StreamManager 中移除指定的 Stream，释放 Stream ID，
+// 并调用清理回调函数。同时更新连接的 Stream 计数。
+//
+// 参数：
+//   - streamID: 要注销的 Stream ID
+//
+// 返回值：
+//   - targetAddr: 目标地址（用于清理亲和性映射）
+//   - isEmpty: 该连接是否已无活跃 Stream
 func (sm *StreamManager) UnregisterStream(streamID byte) (targetAddr string, isEmpty bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -307,7 +362,13 @@ func (sm *StreamManager) UnregisterStream(streamID byte) (targetAddr string, isE
 	return "", len(sm.streams) == 0
 }
 
-// DispatchMessage 分发消息到对应的 stream
+// DispatchMessage 分发消息到对应的 Stream。
+//
+// 根据消息中的 Stream ID 查找对应的 Stream，
+// 并调用其消息处理器的 OnMessage 回调。
+//
+// 参数：
+//   - msg: 要分发的协议消息
 func (sm *StreamManager) DispatchMessage(msg *protocol.Message) {
 	sm.mu.RLock()
 	s, exists := sm.streams[msg.StreamID]
@@ -319,7 +380,10 @@ func (sm *StreamManager) DispatchMessage(msg *protocol.Message) {
 	}
 }
 
-// HandleConnectionClose 处理连接关闭
+// HandleConnectionClose 处理连接关闭事件。
+//
+// 当 WebSocket 连接关闭时调用，通知所有 Stream 的处理器，
+// 并清空所有 Stream 和位图分配状态。
 func (sm *StreamManager) HandleConnectionClose() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -342,14 +406,23 @@ func (sm *StreamManager) HandleConnectionClose() {
 	sm.nextHint = 0
 }
 
-// GetStreamCount 获取当前活跃 stream 数量
+// GetStreamCount 获取当前活跃 Stream 数量。
+//
+// 返回值：当前 StreamManager 管理的 Stream 数量。
 func (sm *StreamManager) GetStreamCount() int {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return len(sm.streams)
 }
 
-// HasTarget 检查是否正在服务指定目标地址
+// HasTarget 检查是否正在服务指定目标地址。
+//
+// 遍历所有 Stream，检查是否有 Stream 的目标地址匹配。
+//
+// 参数：
+//   - targetAddr: 要检查的目标地址
+//
+// 返回值：如果有 Stream 正在服务该地址返回 true，否则返回 false。
 func (sm *StreamManager) HasTarget(targetAddr string) bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -362,7 +435,11 @@ func (sm *StreamManager) HasTarget(targetAddr string) bool {
 	return false
 }
 
-// GetLoadFactor 获取负载因子 (0.0 - 1.0)
+// GetLoadFactor 获取负载因子。
+//
+// 计算当前 Stream 数量占最大 Stream 数量的比例。
+//
+// 返回值：负载因子（0.0 - 1.0），1.0 表示已满。
 func (sm *StreamManager) GetLoadFactor() float64 {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -376,7 +453,11 @@ func (sm *StreamManager) GetLoadFactor() float64 {
 	return float64(len(sm.streams)) / float64(sm.max)
 }
 
-// GetTargetCount 获取服务的不同目标地址数量
+// GetTargetCount 获取服务的不同目标地址数量。
+//
+// 统计所有 Stream 的目标地址，去重后返回数量。
+//
+// 返回值：不同目标地址的数量。
 func (sm *StreamManager) GetTargetCount() int {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -390,7 +471,11 @@ func (sm *StreamManager) GetTargetCount() int {
 	return len(targetSet)
 }
 
-// GetStreamInfo 获取所有 stream 的信息（用于调试）
+// GetStreamInfo 获取所有 Stream 的信息。
+//
+// 返回所有 Stream 的详细信息，用于调试和监控。
+//
+// 返回值：Stream 信息列表。
 func (sm *StreamManager) GetStreamInfo() []StreamInfo {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -407,15 +492,21 @@ func (sm *StreamManager) GetStreamInfo() []StreamInfo {
 	return info
 }
 
-// StreamInfo stream 信息（用于调试）
+// StreamInfo 表示 Stream 的信息快照。
+//
+// StreamInfo 用于调试和监控，包含 Stream 的基本信息和时间统计。
 type StreamInfo struct {
-	ID         byte
-	TargetAddr string
-	Duration   time.Duration
-	IdleTime   time.Duration
+	ID         byte          // Stream ID
+	TargetAddr string        // 目标地址
+	Duration   time.Duration // 存活时间
+	IdleTime   time.Duration // 空闲时间
 }
 
-// String 返回 StreamInfo 的字符串表示
+// String 返回 StreamInfo 的字符串表示。
+//
+// 格式：[ID:目标地址:存活时间:空闲时间]
+//
+// 返回值：格式化的字符串。
 func (si StreamInfo) String() string {
 	return fmt.Sprintf("[%02x:%s:%.1fs:%.1fs]",
 		si.ID, si.TargetAddr,
@@ -426,8 +517,15 @@ func (si StreamInfo) String() string {
 // 窗口流控方法 (借鉴 yamux 设计)
 // ============================================================================
 
-// WaitForSendWindow 等待发送窗口有足够空间
-// 返回 error 表示超时或 Stream 已关闭
+// WaitForSendWindow 等待发送窗口有足够空间。
+//
+// 使用原子操作检查并消耗发送窗口，如果窗口不足则等待。
+// 实现了类似 TCP 的流量控制机制，防止发送端过快发送数据。
+//
+// 参数：
+//   - n: 需要的窗口大小（字节）
+//
+// 返回值：如果超时或 Stream 已关闭返回 error，否则返回 nil。
 func (s *Stream) WaitForSendWindow(n int) error {
 	if n <= 0 {
 		return nil
@@ -460,7 +558,15 @@ func (s *Stream) WaitForSendWindow(n int) error {
 	}
 }
 
-// ConsumeRecvWindow 消耗接收窗口（接收数据时调用）
+// ConsumeRecvWindow 消耗接收窗口。
+//
+// 接收数据时调用，原子减少接收窗口。如果窗口低于 50%，
+// 自动补充窗口以保持流畅接收。
+//
+// 参数：
+//   - n: 接收的字节数
+//
+// 返回值：如果窗口耗尽返回 error，否则返回 nil。
 func (s *Stream) ConsumeRecvWindow(n int) error {
 	if n <= 0 {
 		return nil
@@ -482,13 +588,20 @@ func (s *Stream) ConsumeRecvWindow(n int) error {
 	return nil
 }
 
-// RefillRecvWindow 补充接收窗口
+// RefillRecvWindow 补充接收窗口。
+//
+// 将接收窗口重置为默认窗口大小，用于窗口耗尽后的恢复。
 func (s *Stream) RefillRecvWindow() {
 	windowSize := atomic.LoadInt64(&s.windowSize)
 	atomic.StoreInt64(&s.recvWindow, windowSize)
 }
 
-// RefillSendWindow 补充发送窗口（接收到对端确认时调用）
+// RefillSendWindow 补充发送窗口。
+//
+// 接收到对端确认时调用，增加发送窗口并通知等待的发送者。
+//
+// 参数：
+//   - n: 补充的字节数
 func (s *Stream) RefillSendWindow(n int) {
 	if n <= 0 {
 		return
@@ -508,7 +621,13 @@ func (s *Stream) RefillSendWindow(n int) {
 // 拥塞控制方法 (借鉴 smux 设计)
 // ============================================================================
 
-// RecordRTT 记录 RTT 样本
+// RecordRTT 记录 RTT 样本。
+//
+// 将 RTT 样本添加到历史记录（环形缓冲区），并更新基线 RTT。
+// 用于拥塞检测和窗口大小调整。
+//
+// 参数：
+//   - rtt: RTT 样本值
 func (s *Stream) RecordRTT(rtt time.Duration) {
 	s.windowMu.Lock()
 	defer s.windowMu.Unlock()
@@ -523,7 +642,11 @@ func (s *Stream) RecordRTT(rtt time.Duration) {
 	}
 }
 
-// GetAverageRTT 获取平均 RTT
+// GetAverageRTT 获取平均 RTT。
+//
+// 计算历史记录中所有有效 RTT 样本的平均值。
+//
+// 返回值：平均 RTT，如果没有样本返回 0。
 func (s *Stream) GetAverageRTT() time.Duration {
 	s.windowMu.Lock()
 	defer s.windowMu.Unlock()
@@ -547,8 +670,13 @@ func (s *Stream) getAverageRTTLocked() time.Duration {
 	return sum / time.Duration(count)
 }
 
-// DetectCongestion 检测是否发生拥塞
-// 返回 true 表示检测到拥塞
+// DetectCongestion 检测是否发生拥塞。
+//
+// 基于 RTT 和丢包率判断是否发生拥塞：
+//   - RTT 超过基线 RTT 的 2 倍，或
+//   - 丢包率超过 5%
+//
+// 返回值：如果检测到拥塞返回 true，否则返回 false。
 func (s *Stream) DetectCongestion() bool {
 	s.windowMu.Lock()
 	defer s.windowMu.Unlock()
@@ -574,17 +702,27 @@ func (s *Stream) DetectCongestion() bool {
 	return avgRTT > s.baselineRTT*2 || lossRate > 0.05
 }
 
-// RecordSuccess 记录成功的操作
+// RecordSuccess 记录成功的操作。
+//
+// 增加成功计数，用于计算丢包率和拥塞检测。
 func (s *Stream) RecordSuccess() {
 	atomic.AddInt64(&s.successCount, 1)
 }
 
-// RecordTimeout 记录超时的操作
+// RecordTimeout 记录超时的操作。
+//
+// 增加超时计数，用于计算丢包率和拥塞检测。
 func (s *Stream) RecordTimeout() {
 	atomic.AddInt64(&s.timeoutCount, 1)
 }
 
-// AdjustWindowSize 自适应调整窗口大小（TCP 风格的 AIMD）
+// AdjustWindowSize 自适应调整窗口大小。
+//
+// 使用 TCP 风格的 AIMD（加性增、乘性减）算法：
+//   - 检测到拥塞：窗口减半（最小为 minWindowSize）
+//   - 无拥塞：窗口增加 8KB（最大为 maxWindowSize）
+//
+// 定期调用此方法以动态调整窗口大小，适应网络状况。
 func (s *Stream) AdjustWindowSize() {
 	if s.DetectCongestion() {
 		// 拥塞：乘性减（减半）
@@ -620,7 +758,11 @@ func (s *Stream) AdjustWindowSize() {
 	}
 }
 
-// GetLossRate 获取丢包率
+// GetLossRate 获取丢包率。
+//
+// 计算超时次数占总操作次数的比例。
+//
+// 返回值：丢包率（0.0 - 1.0），如果没有操作记录返回 0。
 func (s *Stream) GetLossRate() float64 {
 	totalCount := atomic.LoadInt64(&s.successCount) + atomic.LoadInt64(&s.timeoutCount)
 	if totalCount == 0 {
@@ -633,7 +775,18 @@ func (s *Stream) GetLossRate() float64 {
 // 状态机方法 (借鉴 yamux 设计)
 // ============================================================================
 
-// TransitionState 状态转换（带合法性检查）
+// TransitionState 执行状态转换。
+//
+// 验证状态转换的合法性，只允许以下转换：
+//   - Idle → SynSent
+//   - SynSent → Established 或 Closed
+//   - Established → FinWait 或 Closed
+//   - FinWait → Closed
+//
+// 参数：
+//   - newState: 目标状态
+//
+// 返回值：如果状态转换非法返回 error，否则返回 nil。
 func (s *Stream) TransitionState(newState StreamState) error {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -661,14 +814,21 @@ func (s *Stream) TransitionState(newState StreamState) error {
 	return nil
 }
 
-// GetState 获取当前状态
+// GetState 获取当前状态。
+//
+// 返回值：Stream 的当前状态。
 func (s *Stream) GetState() StreamState {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	return s.state
 }
 
-// SetPriority 设置 Stream 优先级
+// SetPriority 设置 Stream 优先级。
+//
+// 优先级范围：0（低）- 2（高），超出范围会自动调整。
+//
+// 参数：
+//   - priority: 优先级值（0-2）
 func (s *Stream) SetPriority(priority int) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -681,7 +841,9 @@ func (s *Stream) SetPriority(priority int) {
 	s.priority = priority
 }
 
-// GetPriority 获取 Stream 优先级
+// GetPriority 获取 Stream 优先级。
+//
+// 返回值：Stream 的优先级（0-2）。
 func (s *Stream) GetPriority() int {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()

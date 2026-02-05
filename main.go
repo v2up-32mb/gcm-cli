@@ -1,3 +1,20 @@
+// Package main 是 GCM 代理客户端的程序入口。
+//
+// 程序初始化流程：
+//   1. 加载配置（命令行参数 > 配置文件 > 默认值）
+//   2. 初始化日志系统
+//   3. 初始化 DoH 客户端和 DNS 缓存
+//   4. 初始化中转节点管理器
+//   5. 初始化 ECH 管理器（如果启用）
+//   6. 初始化连接池
+//   7. 设置 DoH 代理（如果启用）
+//   8. 启动连接池预热（异步）
+//   9. 启动 DNS 缓存预热（异步）
+//   10. 启动 SOCKS5 服务器
+//   11. 启动 Metrics 服务器（如果启用）
+//   12. 启动 ECH 定时刷新（如果启用）
+//   13. 启动连接质量监控（如果启用）
+//   14. 等待退出信号
 package main
 
 import (
@@ -20,11 +37,12 @@ import (
 	"gcm/socks5"
 )
 
-// websocketLogger 过滤 websocket 库的冗余日志
+// websocketLogger 过滤 websocket 库的冗余日志。
 type websocketLogger struct {
 	io.Writer
 }
 
+// Write 实现 io.Writer 接口，过滤 "failed to close network connection" 等无害警告。
 func (w *websocketLogger) Write(p []byte) (n int, err error) {
 	// 过滤掉 "failed to close network connection" 这类无害警告
 	if bytes.Contains(p, []byte("failed to close network connection")) {

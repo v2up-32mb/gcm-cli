@@ -1,3 +1,16 @@
+// Package logger 提供分级日志系统和文件日志输出功能。
+//
+// 日志级别：
+//   - DEBUG: 最详细的调试信息
+//   - INFO: 常规运行信息
+//   - WARN: 警告信息
+//   - ERROR: 错误信息
+//
+// 功能：
+//   - 控制台输出（彩色标记）
+//   - 文件日志（支持自动轮转）
+//   - 按作用域分组的日志器
+//   - 全局日志器管理
 package logger
 
 import (
@@ -10,7 +23,7 @@ import (
 	"gcm/config"
 )
 
-// Logger 日志器
+// Logger 提供带作用域的分级日志记录功能。
 type Logger struct {
 	mu         sync.RWMutex
 	level      config.LogLevel
@@ -18,7 +31,12 @@ type Logger struct {
 	fileLogger *FileLogger
 }
 
-// NewLogger 创建新的日志器
+// NewLogger 创建新的日志器。
+//
+// 参数：
+//   - level: 日志级别
+//   - scope: 作用域名称（用于日志前缀）
+//   - fileLogger: 文件日志写入器（可选）
 func NewLogger(level config.LogLevel, scope string, fileLogger *FileLogger) *Logger {
 	return &Logger{
 		level:      level,
@@ -27,7 +45,7 @@ func NewLogger(level config.LogLevel, scope string, fileLogger *FileLogger) *Log
 	}
 }
 
-// SetLevel 设置日志级别
+// SetLevel 设置日志级别。
 func (l *Logger) SetLevel(level config.LogLevel) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -70,40 +88,45 @@ func (l *Logger) log(level config.LogLevel, format string, args ...interface{}) 
 	}
 }
 
-// Debug 输出 DEBUG 级别日志
+// Debug 输出 DEBUG 级别日志。
 func (l *Logger) Debug(format string, args ...interface{}) {
 	l.log(config.DEBUG, format, args...)
 }
 
-// Info 输出 INFO 级别日志
+// Info 输出 INFO 级别日志。
 func (l *Logger) Info(format string, args ...interface{}) {
 	l.log(config.INFO, format, args...)
 }
 
-// Warn 输出 WARN 级别日志
+// Warn 输出 WARN 级别日志。
 func (l *Logger) Warn(format string, args ...interface{}) {
 	l.log(config.WARN, format, args...)
 }
 
-// Error 输出 ERROR 级别日志
+// Error 输出 ERROR 级别日志。
 func (l *Logger) Error(format string, args ...interface{}) {
 	l.log(config.ERROR, format, args...)
 }
 
-// FileLogger 文件日志写入器
+// FileLogger 提供文件日志写入功能，支持自动轮转。
+//
+// 轮转策略：当文件大小达到 maxSize 时，将当前文件重命名为 .1，
+// .1 -> .2，依此类推，超过 backupCount 的备份会被删除。
 type FileLogger struct {
 	mu           sync.Mutex
 	enabled      bool
-	filePath     string
-	maxSize      int64
-	backupCount  int
+	filePath     string  // 日志文件路径
+	maxSize      int64   // 单个日志文件最大大小（字节）
+	backupCount  int     // 保留的备份文件数量
 	file         *os.File
-	currentSize  int64
-	writtenBytes int64
-	rotatedCount int
+	currentSize  int64   // 当前文件大小（字节）
+	writtenBytes int64   // 累计写入字节数
+	rotatedCount int     // 累计轮转次数
 }
 
-// NewFileLogger 创建文件日志写入器
+// NewFileLogger 创建文件日志写入器。
+//
+// 如果 cfg.EnableLogFile 为 false，返回禁用的 FileLogger。
 func NewFileLogger(cfg *config.Config) *FileLogger {
 	if !cfg.EnableLogFile {
 		return &FileLogger{enabled: false}
@@ -199,7 +222,9 @@ func (fl *FileLogger) rotate() {
 	fmt.Printf("[FileLogger] 日志轮转完成，耗时%dms，轮转%d个备份文件\n", elapsed.Milliseconds(), rotated)
 }
 
-// Write 写入日志
+// Write 写入日志（如果已启用）。
+//
+// 写入前会检查文件大小，超过 maxSize 时自动触发轮转。
 func (fl *FileLogger) Write(msg string) {
 	if !fl.enabled || fl.file == nil {
 		return
@@ -221,7 +246,15 @@ func (fl *FileLogger) Write(msg string) {
 	fl.file.WriteString(logLine)
 }
 
-// GetStats 获取统计信息
+// GetStats 获取统计信息。
+//
+// 返回包含以下字段的 map：
+//   - enabled: 是否启用
+//   - filePath: 日志文件路径
+//   - currentSize: 当前文件大小（字节）
+//   - writtenBytes: 累计写入字节数
+//   - rotatedCount: 累计轮转次数
+//   - utilization: 当前文件利用率（百分比）
 func (fl *FileLogger) GetStats() map[string]interface{} {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
@@ -241,7 +274,7 @@ func (fl *FileLogger) GetStats() map[string]interface{} {
 	}
 }
 
-// Close 关闭文件日志
+// Close 关闭文件日志并输出统计信息。
 func (fl *FileLogger) Close() {
 	if fl.file != nil {
 		stats := fl.GetStats()
@@ -252,13 +285,13 @@ func (fl *FileLogger) Close() {
 	}
 }
 
-// MultiWriter 多输出写入器
+// MultiWriter 多输出写入器，将日志同时写入多个目标。
 type MultiWriter struct {
 	writers []io.Writer
 	mu      sync.Mutex
 }
 
-// NewMultiWriter 创建多输出写入器
+// NewMultiWriter 创建多输出写入器。
 func NewMultiWriter(writers ...io.Writer) *MultiWriter {
 	return &MultiWriter{
 		writers: writers,
@@ -291,13 +324,17 @@ var (
 	loggerMapMu      sync.RWMutex
 )
 
-// InitGlobalLogger 初始化全局日志器
+// InitGlobalLogger 初始化全局日志器。
+//
+// 根据 cfg 创建全局文件日志器并设置全局日志级别。
 func InitGlobalLogger(cfg *config.Config) {
 	globalLevel = cfg.LogLevel
 	globalFileLogger = NewFileLogger(cfg)
 }
 
-// GetLogger 获取指定作用域的日志器
+// GetLogger 获取指定作用域的日志器（单例模式）。
+//
+// 按作用域缓存日志器实例，相同作用域返回同一实例。
 func GetLogger(scope string) *Logger {
 	loggerMapMu.RLock()
 	if logger, ok := loggerMap[scope]; ok {
@@ -319,7 +356,7 @@ func GetLogger(scope string) *Logger {
 	return logger
 }
 
-// SetGlobalLevel 设置全局日志级别
+// SetGlobalLevel 设置全局日志级别（影响所有已创建的日志器）。
 func SetGlobalLevel(level config.LogLevel) {
 	loggerMapMu.Lock()
 	defer loggerMapMu.Unlock()
@@ -330,7 +367,7 @@ func SetGlobalLevel(level config.LogLevel) {
 	}
 }
 
-// Close 关闭全局日志器
+// Close 关闭全局日志器（关闭文件日志）。
 func Close() {
 	if globalFileLogger != nil {
 		globalFileLogger.Close()

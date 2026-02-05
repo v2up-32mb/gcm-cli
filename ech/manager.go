@@ -1,3 +1,10 @@
+// Package ech 提供 TLS ECH (Encrypted Client Hello) 配置管理功能。
+//
+// 主要功能：
+//   - 从 DoH 获取 ECH 配置
+//   - 配置缓存（支持 TTL）
+//   - 定时自动刷新
+//   - SingleFlight 防止缓存击穿
 package ech
 
 import (
@@ -10,13 +17,15 @@ import (
 	"gcm/logger"
 )
 
-// cacheEntry ECH 缓存条目
+// cacheEntry 表示 ECH 缓存条目。
 type cacheEntry struct {
-	echConfig []byte    // ECH 配置字节
-	expiresAt time.Time // 过期时间
+	// echConfig 是 ECH 配置的字节数据。
+	echConfig []byte
+	// expiresAt 是缓存过期时间。
+	expiresAt time.Time
 }
 
-// EchManager ECH 配置管理器
+// EchManager 管理 ECH 配置的缓存和刷新。
 type EchManager struct {
 	mu              sync.RWMutex
 	cache           map[string]*cacheEntry
@@ -32,18 +41,13 @@ type EchManager struct {
 	flightMap  map[string]*flight  // 正在进行的查询
 }
 
-// flight 代表一个正在进行的 ECH 配置查询
-type flight struct {
-	wg    sync.WaitGroup
-	value []byte
-	err   error
-}
-
-// NewEchManager 创建 ECH 管理器
-// dohClient: DoH 客户端实例，用于查询 HTTPS 记录
-// echDomain: ECH 查询域名，用于获取 HTTPS 记录中的 ECH 配置
-// cacheTTL: 缓存过期时间，默认 24 小时
-// refreshInterval: 定时刷新间隔，默认 12 小时（0 表示禁用定时刷新）
+// NewEchManager 创建 ECH 管理器。
+//
+// 参数：
+//   - dohClient: DoH 客户端实例，用于查询 HTTPS 记录
+//   - echDomain: ECH 查询域名，用于获取 HTTPS 记录中的 ECH 配置
+//   - cacheTTL: 缓存过期时间，默认 24 小时
+//   - refreshInterval: 定时刷新间隔，默认 12 小时（0 表示禁用定时刷新）
 func NewEchManager(dohClient *dns.DoHClient, echDomain string, cacheTTL time.Duration, refreshInterval time.Duration) *EchManager {
 	if cacheTTL == 0 {
 		cacheTTL = 24 * time.Hour // 默认 24 小时
@@ -67,9 +71,13 @@ func NewEchManager(dohClient *dns.DoHClient, echDomain string, cacheTTL time.Dur
 	}
 }
 
-// GetTlsConfig 获取 TLS 配置
-// domain: 目标域名
-// useEch: 是否启用 ECH
+// GetTlsConfig 获取 TLS 配置。
+//
+// 参数：
+//   - domain: 目标域名
+//   - useEch: 是否启用 ECH
+//
+// 如果 ECH 获取失败，自动回退到标准 TLS（不返回错误）。
 func (em *EchManager) GetTlsConfig(domain string, useEch bool) (*tls.Config, error) {
 	// 基础 TLS 配置
 	tlsConfig := &tls.Config{
@@ -96,8 +104,9 @@ func (em *EchManager) GetTlsConfig(domain string, useEch bool) (*tls.Config, err
 	return tlsConfig, nil
 }
 
-// getECHConfig 获取 ECH 配置（带缓存和 singleFlight 防止击穿）
-// domain 参数保留用于日志，实际查询使用 em.echDomain
+// getECHConfig 获取 ECH 配置（带缓存和 SingleFlight 防止击穿）。
+//
+// domain 参数用于日志输出，实际查询使用 em.echDomain。
 func (em *EchManager) getECHConfig(domain string) ([]byte, error) {
 	// 使用 echDomain 作为缓存键
 	cacheKey := em.echDomain
@@ -167,7 +176,7 @@ func (em *EchManager) getECHConfig(domain string) ([]byte, error) {
 	return result, err
 }
 
-// fetchAndCache 从 DoH 查询 ECH 配置并缓存
+// fetchAndCache 从 DoH 查询 ECH 配置并缓存。
 func (em *EchManager) fetchAndCache(domain string) ([]byte, error) {
 	// 调用 DoH 查询函数
 	echConfig, err := em.dohFunc(domain)
@@ -194,8 +203,9 @@ func (em *EchManager) fetchAndCache(domain string) ([]byte, error) {
 	return echConfig, nil
 }
 
-// Refresh 强制刷新指定域名的 ECH 配置
-// 此方法会立即从 DoH 查询最新配置并更新缓存
+// Refresh 强制刷新指定域名的 ECH 配置。
+//
+// 此方法会立即从 DoH 查询最新配置并更新缓存。
 func (em *EchManager) Refresh(domain string) error {
 	em.log.Info("强制刷新 %s 的 ECH 配置", domain)
 
@@ -213,7 +223,7 @@ func (em *EchManager) Refresh(domain string) error {
 	return nil
 }
 
-// ClearCache 清空所有缓存
+// ClearCache 清空所有缓存。
 func (em *EchManager) ClearCache() {
 	em.mu.Lock()
 	defer em.mu.Unlock()
@@ -223,7 +233,9 @@ func (em *EchManager) ClearCache() {
 	em.log.Info("已清空 ECH 缓存 (清除 %d 个条目)", count)
 }
 
-// GetCacheStats 获取缓存统计信息
+// GetCacheStats 获取缓存统计信息。
+//
+// 返回：总条目数、过期条目数。
 func (em *EchManager) GetCacheStats() (total int, expired int) {
 	em.mu.RLock()
 	defer em.mu.RUnlock()
@@ -240,7 +252,9 @@ func (em *EchManager) GetCacheStats() (total int, expired int) {
 	return total, expired
 }
 
-// CleanupExpired 清理过期的缓存条目
+// CleanupExpired 清理过期的缓存条目。
+//
+// 返回：清理的条目数。
 func (em *EchManager) CleanupExpired() int {
 	em.mu.Lock()
 	defer em.mu.Unlock()
@@ -262,15 +276,16 @@ func (em *EchManager) CleanupExpired() int {
 	return cleaned
 }
 
-// StartAutoRefresh 启动定时刷新任务
-// 会在后台定期刷新所有缓存的 ECH 配置
+// StartAutoRefresh 启动定时刷新任务。
+//
+// 会在后台定期刷新所有缓存的 ECH 配置。
 func (em *EchManager) StartAutoRefresh() {
 	em.log.Info("启动 ECH 定时刷新任务 (间隔: %v)", em.refreshInterval)
 
 	go em.autoRefreshLoop()
 }
 
-// autoRefreshLoop 定时刷新循环（后台运行）
+// autoRefreshLoop 定时刷新循环（后台运行）。
 func (em *EchManager) autoRefreshLoop() {
 	ticker := time.NewTicker(em.refreshInterval)
 	defer ticker.Stop()
@@ -286,7 +301,7 @@ func (em *EchManager) autoRefreshLoop() {
 	}
 }
 
-// refreshAllCached 刷新 ECH 配置
+// refreshAllCached 刷新 ECH 配置。
 func (em *EchManager) refreshAllCached() {
 	em.log.Info("开始定时刷新 ECH 配置: %s", em.echDomain)
 	startTime := time.Now()
@@ -300,7 +315,7 @@ func (em *EchManager) refreshAllCached() {
 	}
 }
 
-// StopAutoRefresh 停止定时刷新任务
+// StopAutoRefresh 停止定时刷新任务。
 func (em *EchManager) StopAutoRefresh() {
 	close(em.stopChan)
 }

@@ -9,8 +9,19 @@ import (
 	"gcm/logger"
 )
 
-// SessionRotator 管理连接会话的自动轮换
-// 应对 Cloudflare Worker 的 110 秒时长限制
+// SessionRotator 表示连接会话自动轮换器。
+//
+// SessionRotator 管理 WebSocket 连接的生命周期，应对 Cloudflare Worker
+// 的 110 秒时长限制。当连接达到最大寿命时，进入排空状态（不再接受新请求），
+// 等待现有流完成后关闭连接。采用平滑销毁策略，每次只处理一个连接。
+//
+// 工作流程：
+//  1. 定期检查所有连接的年龄
+//  2. 达到 maxLifetime 的连接进入排空状态
+//  3. 排空期间等待现有流完成
+//  4. 超过 drainTimeout 或流数为 0 时关闭连接
+//
+// 并发安全：所有公开方法都是并发安全的。
 type SessionRotator struct {
 	pool          *ConnectionPool
 	maxLifetime   time.Duration
@@ -21,7 +32,13 @@ type SessionRotator struct {
 	stopChan      chan struct{}
 }
 
-// NewSessionRotator 创建会话轮换器
+// NewSessionRotator 创建并初始化会话轮换器。
+//
+// 参数：
+//   - pool: 连接池实例
+//   - cfg: 配置对象
+//
+// 返回值：初始化完成的 SessionRotator 实例（自动启动后台轮换循环）。
 func NewSessionRotator(pool *ConnectionPool, cfg *config.Config) *SessionRotator {
 	sr := &SessionRotator{
 		pool:          pool,
@@ -112,7 +129,12 @@ func (sr *SessionRotator) checkAndRotateSessions() {
 	}
 }
 
-// IsDraining 检查连接是否正在排空
+// IsDraining 检查连接是否正在排空。
+//
+// 参数：
+//   - conn: 要检查的连接
+//
+// 返回值：如果连接正在排空返回 true，否则返回 false。
 func (sr *SessionRotator) IsDraining(conn *ConnItem) bool {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
@@ -120,24 +142,40 @@ func (sr *SessionRotator) IsDraining(conn *ConnItem) bool {
 	return draining
 }
 
-// ShouldUseConnection 检查连接是否应该被使用（非排空状态）
+// ShouldUseConnection 检查连接是否应该被使用。
+//
+// 参数：
+//   - conn: 要检查的连接
+//
+// 返回值：如果连接可以使用（非排空状态）返回 true，否则返回 false。
 func (sr *SessionRotator) ShouldUseConnection(conn *ConnItem) bool {
 	return !sr.IsDraining(conn)
 }
 
-// Stop 停止轮换器
+// Stop 停止会话轮换器。
+//
+// 停止后台轮换循环，释放资源。
+// 调用此方法后，SessionRotator 实例不应再被使用。
 func (sr *SessionRotator) Stop() {
 	close(sr.stopChan)
 }
 
-// GetDrainingCount 获取正在排空的连接数量
+// GetDrainingCount 获取正在排空的连接数量。
+//
+// 返回值：当前正在排空的连接数量。
 func (sr *SessionRotator) GetDrainingCount() int {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
 	return len(sr.drainingConns)
 }
 
-// GetStats 获取轮换器统计信息
+// GetStats 获取轮换器统计信息。
+//
+// 返回值：包含以下字段的统计信息 map：
+//   - draining_count: 正在排空的连接数量
+//   - max_lifetime: 最大连接寿命
+//   - drain_timeout: 排空超时时间
+//   - draining_connections: 正在排空的连接详情列表
 func (sr *SessionRotator) GetStats() map[string]interface{} {
 	sr.mu.RLock()
 	defer sr.mu.RUnlock()
@@ -165,7 +203,12 @@ func (sr *SessionRotator) GetStats() map[string]interface{} {
 	return stats
 }
 
-// RemoveConnection 从排空列表中移除连接（用于连接异常关闭时的清理）
+// RemoveConnection 从排空列表中移除连接。
+//
+// 用于连接异常关闭时的清理，确保排空列表不会累积已关闭的连接。
+//
+// 参数：
+//   - conn: 要移除的连接
 func (sr *SessionRotator) RemoveConnection(conn *ConnItem) {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()

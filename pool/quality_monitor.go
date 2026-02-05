@@ -14,19 +14,37 @@ import (
 	"gcm/relay"
 )
 
-// ConnectionQualityMonitor 连接质量监控器
+// ConnectionQualityMonitor 表示连接质量监控器。
+//
+// ConnectionQualityMonitor 定期检查所有 WebSocket 连接的质量，
+// 基于 RTT、丢包率和心跳失败次数计算质量评分（0-100）。
+// 当连接质量劣化时，自动触发节点切换，确保服务质量。
+//
+// 评分机制：
+//   - RTT 评分（权重 40%）：RTT 翻倍扣 40 分，增加 50% 扣 20 分
+//   - 丢包率评分（权重 40%）：丢包率 > 5% 扣 40 分，> 2% 扣 20 分
+//   - 心跳失败评分（权重 20%）：失败 > 3 次扣 20 分，> 1 次扣 10 分
+//
+// 并发安全：所有公开方法都是并发安全的。
 type ConnectionQualityMonitor struct {
-	pool              *ConnectionPool
-	checkInterval     time.Duration // 检查间隔（默认 10 秒）
-	degradeThreshold  int64         // 劣化阈值（分数 < 60）
-	switchCooldown    time.Duration // 切换冷却期（默认 5 分钟）
-	lastSwitchTime    time.Time     // 上次切换时间
-	mu                sync.Mutex
-	log               *logger.Logger
-	stopChan          chan struct{}
+	pool             *ConnectionPool
+	checkInterval    time.Duration // 检查间隔（默认 10 秒）
+	degradeThreshold int64         // 劣化阈值（分数 < 60）
+	switchCooldown   time.Duration // 切换冷却期（默认 5 分钟）
+	lastSwitchTime   time.Time     // 上次切换时间
+	mu               sync.Mutex
+	log              *logger.Logger
+	stopChan         chan struct{}
 }
 
-// NewConnectionQualityMonitor 创建连接质量监控器
+// NewConnectionQualityMonitor 创建并初始化连接质量监控器。
+//
+// 参数：
+//   - pool: 连接池实例
+//   - cfg: 配置对象
+//   - log: 日志记录器
+//
+// 返回值：初始化完成的 ConnectionQualityMonitor 实例（需要调用 Start 方法启动监控）。
 func NewConnectionQualityMonitor(pool *ConnectionPool, cfg *config.Config, log *logger.Logger) *ConnectionQualityMonitor {
 	return &ConnectionQualityMonitor{
 		pool:             pool,
@@ -38,13 +56,19 @@ func NewConnectionQualityMonitor(pool *ConnectionPool, cfg *config.Config, log *
 	}
 }
 
-// Start 启动质量监控循环
+// Start 启动质量监控循环。
+//
+// 在后台 goroutine 中定期检查所有连接的质量，
+// 计算质量评分并触发节点切换（如果需要）。
 func (m *ConnectionQualityMonitor) Start() {
 	go m.qualityMonitorLoop()
 	m.log.Info("连接质量监控器已启动")
 }
 
-// Stop 停止质量监控循环
+// Stop 停止质量监控循环。
+//
+// 停止后台监控 goroutine，释放资源。
+// 调用此方法后，ConnectionQualityMonitor 实例不应再被使用。
 func (m *ConnectionQualityMonitor) Stop() {
 	close(m.stopChan)
 	m.log.Info("连接质量监控器已停止")
@@ -254,6 +278,3 @@ func (m *ConnectionQualityMonitor) resortIdlePool() {
 		return scoreI > scoreJ // 降序：高分在前
 	})
 }
-
-
-

@@ -20,13 +20,37 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// EchManagerInterface ECH 管理器接口
+// EchManagerInterface 表示 ECH (Encrypted Client Hello) 管理器接口。
+//
+// EchManagerInterface 定义了 ECH 配置管理的标准接口，用于获取 TLS 配置
+// 和刷新 ECH 配置。实现此接口的类型可以提供 ECH 支持。
+//
+// 主要方法：
+//   - GetTlsConfig: 获取包含 ECH 配置的 TLS 配置对象
+//   - Refresh: 刷新指定域名的 ECH 配置
 type EchManagerInterface interface {
 	GetTlsConfig(domain string, useEch bool) (*tls.Config, error)
 	Refresh(domain string) error
 }
 
-// ConnItem 连接项
+// ConnItem 表示单个 WebSocket 连接项。
+//
+// ConnItem 封装了一个 WebSocket 连接及其相关的状态信息，包括连接标识、
+// 流量统计、质量监控、多路复用状态等。每个 ConnItem 对应一个到 Worker 的
+// WebSocket 连接，可以承载多个并发的 Stream（多路复用模式）。
+//
+// 主要功能：
+//   - 连接标识：3 字节的 WS ID，全局唯一
+//   - 流量统计：发送/接收字节数、活跃 Stream 数量
+//   - 质量监控：RTT、丢包率、心跳失败次数、质量评分（0-100）
+//   - 多路复用：目标地址亲和性、Stream 数量管理
+//   - 生命周期：创建时间、过期时间（带随机偏移）
+//
+// 并发安全：
+//   - WS 写操作使用 writeMu 保护
+//   - targets 映射使用 mu 保护
+//   - 质量监控字段使用 qualityMu 保护
+//   - 原子字段（RTT、Streams、QualityScore 等）使用 atomic 操作
 type ConnItem struct {
 	WS           *websocket.Conn
 	ConnectionID []byte // 3 bytes WS ID
@@ -39,31 +63,46 @@ type ConnItem struct {
 	mu           sync.Mutex          // 保护 targets
 	writeMu      sync.Mutex          // 保护 WS 写操作
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
-	closing      atomic.Bool          // 正在关闭标记（防止重复清理）
-	inPool       atomic.Bool          // 是否在空闲池中（防止重复放入）
+	closing      atomic.Bool         // 正在关闭标记（防止重复清理）
+	inPool       atomic.Bool         // 是否在空闲池中（防止重复放入）
 
 	// 质量监控字段
-	QualityScore      int64              // 质量评分 (0-100)，原子操作
-	BaselineRTT       time.Duration      // 基线 RTT（创建时的 RTT）
-	RTTHistory        [10]time.Duration  // RTT 历史（环形缓冲区）
-	RTTIndex          int                // RTT 历史索引
-	HeartbeatFailures int64              // 心跳失败次数（原子操作）
-	RequestFailures   int64              // 请求失败次数（原子操作）
-	RequestSuccesses  int64              // 请求成功次数（原子操作）
-	LastQualityCheck  time.Time          // 上次质量检查时间
-	IsDegraded        bool               // 是否已劣化
-	DegradedSince     time.Time          // 劣化开始时间
-	qualityMu         sync.Mutex         // 保护质量监控字段
+	QualityScore      int64             // 质量评分 (0-100)，原子操作
+	BaselineRTT       time.Duration     // 基线 RTT（创建时的 RTT）
+	RTTHistory        [10]time.Duration // RTT 历史（环形缓冲区）
+	RTTIndex          int               // RTT 历史索引
+	HeartbeatFailures int64             // 心跳失败次数（原子操作）
+	RequestFailures   int64             // 请求失败次数（原子操作）
+	RequestSuccesses  int64             // 请求成功次数（原子操作）
+	LastQualityCheck  time.Time         // 上次质量检查时间
+	IsDegraded        bool              // 是否已劣化
+	DegradedSince     time.Time         // 劣化开始时间
+	qualityMu         sync.Mutex        // 保护质量监控字段
 }
 
-// WriteMessage 线程安全的 WebSocket 写入方法
+// WriteMessage 线程安全的 WebSocket 写入方法。
+//
+// WriteMessage 使用互斥锁保护 WebSocket 的写操作，确保并发写入的安全性。
+// gorilla/websocket 库要求同一时刻只能有一个 goroutine 执行写操作。
+//
+// 参数：
+//   - messageType: WebSocket 消息类型（BinaryMessage 或 TextMessage）
+//   - data: 要发送的数据
+//
+// 返回值：错误（如果有）。
 func (c *ConnItem) WriteMessage(messageType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.WS.WriteMessage(messageType, data)
 }
 
-// AddTarget 添加目标地址到该连接的服务集合
+// AddTarget 添加目标地址到该连接的服务集合。
+//
+// AddTarget 用于多路复用模式下的目标地址亲和性管理。
+// 记录该连接正在服务的目标地址，用于后续请求的连接选择优化。
+//
+// 参数：
+//   - target: 目标地址（格式：host:port）
 func (c *ConnItem) AddTarget(target string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -73,7 +112,12 @@ func (c *ConnItem) AddTarget(target string) {
 	c.targets[target] = struct{}{}
 }
 
-// RemoveTarget 从该连接的服务集合中移除目标地址
+// RemoveTarget 从该连接的服务集合中移除目标地址。
+//
+// RemoveTarget 在 Stream 关闭时调用，清理目标地址亲和性记录。
+//
+// 参数：
+//   - target: 目标地址（格式：host:port）
 func (c *ConnItem) RemoveTarget(target string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -82,7 +126,14 @@ func (c *ConnItem) RemoveTarget(target string) {
 	}
 }
 
-// HasTarget 检查该连接是否服务于指定目标地址
+// HasTarget 检查该连接是否服务于指定目标地址。
+//
+// HasTarget 用于多路复用模式下的连接选择优化，优先选择已经服务该目标的连接。
+//
+// 参数：
+//   - target: 目标地址（格式：host:port）
+//
+// 返回值：如果该连接正在服务该目标返回 true，否则返回 false。
 func (c *ConnItem) HasTarget(target string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -93,7 +144,11 @@ func (c *ConnItem) HasTarget(target string) bool {
 	return exists
 }
 
-// GetTargetCount 获取该连接服务的目标地址数量
+// GetTargetCount 获取该连接服务的目标地址数量。
+//
+// GetTargetCount 返回该连接当前服务的不同目标地址数量，用于负载均衡和连接选择。
+//
+// 返回值：目标地址数量。
 func (c *ConnItem) GetTargetCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -103,7 +158,15 @@ func (c *ConnItem) GetTargetCount() int {
 	return len(c.targets)
 }
 
-// LoadFactor 计算负载因子 (0.0 - 1.0，越高越拥挤)
+// LoadFactor 计算负载因子。
+//
+// LoadFactor 计算该连接的负载因子（0.0 - 1.0），表示连接的拥挤程度。
+// 负载因子越高表示连接越拥挤，越不适合分配新的 Stream。
+//
+// 参数：
+//   - maxStreams: 每个连接的最大 Stream 数量
+//
+// 返回值：负载因子（0.0 表示空闲，1.0 表示已满）。
 func (c *ConnItem) LoadFactor(maxStreams int) float64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -121,8 +184,17 @@ func (c *ConnItem) LoadFactor(maxStreams int) float64 {
 // 质量监控方法
 // ============================================================================
 
-// CalculateQualityScore 计算连接质量评分（0-100）
-// 评分算法：RTT 50% + 丢包率 30% + 流数 20%
+// CalculateQualityScore 计算连接质量评分。
+//
+// CalculateQualityScore 基于 RTT、丢包率和活跃流数计算连接的质量评分（0-100）。
+// 评分越高表示连接质量越好，越适合分配新的请求。
+//
+// 评分算法：
+//   - RTT 评分（权重 50%）：RTT 每增加 10ms 扣 1 分
+//   - 丢包率评分（权重 30%）：丢包率越高扣分越多
+//   - 流数评分（权重 20%）：活跃流数越多扣分越多
+//
+// 返回值：质量评分（0-100），同时缓存到 QualityScore 字段。
 func (c *ConnItem) CalculateQualityScore() int64 {
 	c.qualityMu.Lock()
 	defer c.qualityMu.Unlock()
@@ -166,7 +238,13 @@ func (c *ConnItem) CalculateQualityScore() int64 {
 	return score
 }
 
-// RecordRTT 记录 RTT 样本
+// RecordRTT 记录 RTT 样本。
+//
+// RecordRTT 将 RTT 样本添加到历史记录（环形缓冲区），并更新当前 RTT 值。
+// 用于质量监控和连接选择优化。
+//
+// 参数：
+//   - rtt: RTT 样本值
 func (c *ConnItem) RecordRTT(rtt time.Duration) {
 	c.qualityMu.Lock()
 	defer c.qualityMu.Unlock()
@@ -179,17 +257,26 @@ func (c *ConnItem) RecordRTT(rtt time.Duration) {
 	c.RTT.Store(rtt.Nanoseconds())
 }
 
-// RecordSuccess 记录成功的请求
+// RecordSuccess 记录成功的请求。
+//
+// RecordSuccess 增加成功请求计数，用于计算丢包率和质量评分。
 func (c *ConnItem) RecordSuccess() {
 	atomic.AddInt64(&c.RequestSuccesses, 1)
 }
 
-// RecordFailure 记录失败的请求
+// RecordFailure 记录失败的请求。
+//
+// RecordFailure 增加失败请求计数，用于计算丢包率和质量评分。
 func (c *ConnItem) RecordFailure() {
 	atomic.AddInt64(&c.RequestFailures, 1)
 }
 
-// GetAverageRTT 获取平均 RTT
+// GetAverageRTT 获取平均 RTT。
+//
+// GetAverageRTT 计算 RTT 历史记录中所有有效样本的平均值。
+// 用于质量监控和连接选择优化。
+//
+// 返回值：平均 RTT，如果没有样本返回 0。
 func (c *ConnItem) GetAverageRTT() time.Duration {
 	c.qualityMu.Lock()
 	defer c.qualityMu.Unlock()
@@ -210,7 +297,12 @@ func (c *ConnItem) GetAverageRTT() time.Duration {
 	return sum / time.Duration(count)
 }
 
-// GetLossRate 获取丢包率
+// GetLossRate 获取丢包率。
+//
+// GetLossRate 计算请求失败次数占总请求次数的比例。
+// 用于质量监控和连接选择优化。
+//
+// 返回值：丢包率（0.0 - 1.0），如果没有请求记录返回 0。
 func (c *ConnItem) GetLossRate() float64 {
 	successes := atomic.LoadInt64(&c.RequestSuccesses)
 	failures := atomic.LoadInt64(&c.RequestFailures)
@@ -222,7 +314,16 @@ func (c *ConnItem) GetLossRate() float64 {
 	return float64(failures) / float64(total)
 }
 
-// StreamHandler 流处理器
+// StreamHandler 表示 Stream 消息处理器。
+//
+// StreamHandler 定义了 Stream 生命周期中的回调函数，用于处理消息、关闭、错误和清理事件。
+// 在多路复用模式下，每个 Stream 都有一个独立的 StreamHandler。
+//
+// 回调函数：
+//   - OnMessage: 接收到消息时调用（CONNECTED、DATA、CLOSE 消息）
+//   - OnClose: 连接关闭时调用
+//   - OnError: 发生错误时调用
+//   - OnCleanup: 清理资源时调用（Stream 注销时）
 type StreamHandler struct {
 	OnMessage func(msg *protocol.Message)
 	OnClose   func()
@@ -230,7 +331,31 @@ type StreamHandler struct {
 	OnCleanup func()
 }
 
-// ConnectionPool WebSocket 连接池
+// ConnectionPool 表示 WebSocket 连接池。
+//
+// ConnectionPool 管理到 Cloudflare Worker 的 WebSocket 连接，提供连接复用、
+// 多路复用、负载均衡、质量监控等功能。这是 GCM 代理客户端的核心组件。
+//
+// 主要功能：
+//   - 连接管理：自动维护连接池大小（minPoolSize ~ maxPoolSize）
+//   - 多路复用：单个连接支持多个并发 Stream（0-255）
+//   - 负载均衡：基于质量评分和负载因子选择最优连接
+//   - 质量监控：RTT、丢包率、心跳检测
+//   - 请求队列：连接池耗尽时排队等待
+//   - 自动维护：定期清理过期连接、补充连接、心跳保活
+//   - 中转节点：支持通过中转节点连接 Worker
+//   - ECH 支持：支持 TLS Encrypted Client Hello
+//
+// 工作流程：
+//  1. 启动时预热连接池（可选）
+//  2. 请求到达时从池中获取连接
+//  3. 多路复用模式下分配 Stream ID
+//  4. 发送 CONNECT 消息建立隧道
+//  5. 双向数据转发
+//  6. 连接空闲时归还到池中
+//  7. 后台维护循环定期清理和补充
+//
+// 并发安全：所有公开方法都是并发安全的。
 type ConnectionPool struct {
 	mu           sync.RWMutex
 	cfg          *config.Config
@@ -274,7 +399,24 @@ type connRequest struct {
 	errCh  chan error
 }
 
-// PoolStats 连接池统计
+// PoolStats 表示连接池统计信息。
+//
+// PoolStats 记录连接池的运行统计数据，包括请求统计、响应时间、流量统计和连接统计。
+// 所有字段都使用原子操作更新，确保并发安全。
+//
+// 统计字段：
+//   - Requests: 总请求数
+//   - Successes: 成功请求数
+//   - Failures: 失败请求数
+//   - Timeouts: 超时请求数
+//   - TotalResponseTime: 总响应时间（纳秒）
+//   - MinResponseTime: 最小响应时间（纳秒）
+//   - MaxResponseTime: 最大响应时间（纳秒）
+//   - BytesReceived: 总接收字节数
+//   - BytesSent: 总发送字节数
+//   - StartTime: 连接池启动时间
+//   - CreatedConnections: 创建的连接总数
+//   - ClosedConnections: 关闭的连接总数
 type PoolStats struct {
 	Requests           int64
 	Successes          int64
@@ -290,7 +432,21 @@ type PoolStats struct {
 	ClosedConnections  int64
 }
 
-// NewConnectionPool 创建连接池
+// NewConnectionPool 创建并初始化连接池。
+//
+// NewConnectionPool 创建一个新的 WebSocket 连接池实例，初始化所有必要的数据结构，
+// 并启动后台维护循环（连接维护、心跳保活、动态调整等）。
+//
+// 参数：
+//   - cfg: 配置对象
+//   - relayMgr: 中转节点管理器
+//   - echMgr: ECH 配置管理器（可选，传 nil 表示不使用 ECH）
+//
+// 返回值：初始化完成的 ConnectionPool 实例。
+//
+// 注意：
+//   - 返回的连接池已经启动了后台维护循环
+//   - 调用方应该在程序退出时调用 Close 方法清理资源
 func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr EchManagerInterface) *ConnectionPool {
 	p := &ConnectionPool{
 		cfg:                cfg,
@@ -336,7 +492,23 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr 
 	return p
 }
 
-// Warmup 连接池预热（串行创建，错峰启动）
+// Warmup 预热连接池。
+//
+// Warmup 在连接池启动时串行创建指定数量的连接，加速首次请求的响应速度。
+// 连接创建间隔会根据 TTL 自动计算，避免连接同时过期。
+//
+// 工作流程：
+//  1. 检查是否启用预热（EnablePoolWarmup）
+//  2. 计算创建间隔（TTL / 目标数量，限制在 200ms-2s 之间）
+//  3. 串行创建连接，每次创建后等待间隔时间
+//  4. 连续失败 3 次则提前终止
+//  5. 超过 WarmupTimeout 则提前终止
+//
+// 返回值：错误（如果有）。
+//
+// 注意：
+//   - 预热失败不影响服务启动，后续请求会触发按需创建
+//   - 预热过程在后台 goroutine 中执行，不阻塞主线程
 func (p *ConnectionPool) Warmup() error {
 	if !p.cfg.EnablePoolWarmup || p.currentMinPoolSize <= 0 {
 		return nil
@@ -455,8 +627,8 @@ func (p *ConnectionPool) handleDialError(err error, relay *relay.RelayNode) {
 	// 1. 判断是否为 ECH 相关错误
 	if p.cfg.EnableECH && p.echManager != nil {
 		if strings.Contains(errStr, "ech") ||
-		   strings.Contains(errStr, "encrypted_client_hello") ||
-		   strings.Contains(errStr, "tls: handshake failure") {
+			strings.Contains(errStr, "encrypted_client_hello") ||
+			strings.Contains(errStr, "tls: handshake failure") {
 
 			// 增加 ECH 失败计数
 			failCount := atomic.AddInt32(&p.echFailureCount, 1)
@@ -1081,8 +1253,26 @@ func (p *ConnectionPool) handleConnectionFailure() {
 	}
 }
 
-// GetConnectionWithStream 原子化地获取连接并分配流 ID
-// 这是推荐使用的方法，它确保获取连接和分配流是原子操作，避免阻塞
+// GetConnectionWithStream 原子化地获取连接并分配 Stream ID。
+//
+// GetConnectionWithStream 是推荐使用的方法，它确保获取连接和分配 Stream 是原子操作，
+// 避免了先获取连接再分配 Stream 时可能出现的阻塞问题。
+//
+// 工作流程：
+//  1. 优先从空闲池获取连接（按质量评分排序）
+//  2. 尝试从活跃连接中选择负载最低的连接
+//  3. 如果所有连接都已满，创建新连接或排队等待
+//  4. 分配 Stream ID（0-255）
+//  5. 返回连接和 Stream ID
+//
+// 参数：
+//   - ctx: 上下文对象（支持超时和取消）
+//   - targetAddr: 目标地址（格式：host:port）
+//
+// 返回值：
+//   - *ConnItem: 连接项
+//   - byte: 分配的 Stream ID
+//   - error: 错误（如果有）
 func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr string) (*ConnItem, byte, error) {
 	maxStreams := int(p.cfg.MaxStreamsPerConnection)
 	deadline, hasDeadline := ctx.Deadline()
@@ -1252,9 +1442,30 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 	}
 }
 
-// GetConnection 获取连接（支持目标地址亲和性）
-// 注意：此方法只获取连接，不分配流。调用者需要调用 AllocateStreamID 分配流。
-// 推荐使用 GetConnectionWithStream 代替此方法。
+// GetConnection 从连接池获取连接。
+//
+// GetConnection 使用智能选择算法从连接池中选择最优连接，支持多路复用模式。
+// 这是传统的获取连接方法，不包含 Stream ID 分配（需要单独调用 AllocateStreamID）。
+//
+// 选择策略：
+//  1. 优先从空闲池选择（按质量评分排序）
+//  2. 检查目标地址亲和性（优先选择已服务该目标的连接）
+//  3. 从活跃连接中选择负载最低的连接
+//  4. 如果所有连接都已满，创建新连接或排队等待
+//
+// 评分算法：
+//   - 负载因子（权重 60%）：活跃流数 / 最大流数
+//   - RTT（权重 40%）：归一化 RTT（假设 2000ms 为最差情况）
+//
+// 参数：
+//   - ctx: 上下文对象（支持超时和取消）
+//   - targetAddr: 目标地址（格式：host:port）
+//
+// 返回值：
+//   - *ConnItem: 连接项
+//   - error: 错误（如果有）
+//
+// 注意：推荐使用 GetConnectionWithStream 方法，它提供原子化的连接获取和 Stream 分配。
 func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (*ConnItem, error) {
 	var selectedItem *ConnItem
 	var selectedReason string
@@ -1422,7 +1633,24 @@ func formatConnID(connID []byte) string {
 	return fmt.Sprintf("%02x%02x%02x", connID[0], connID[1], connID[2])
 }
 
-// ReleaseConnection 释放连接
+// ReleaseConnection 释放连接回连接池。
+//
+// ReleaseConnection 将使用完毕的连接归还到空闲池，供后续请求复用。
+// 只有当连接没有活跃 Stream 时才会放回池中，否则保持在活跃状态。
+//
+// 工作流程：
+//  1. 检查连接是否已经被关闭（通过 managerByConn 检查）
+//  2. 获取当前 Stream 数量
+//  3. 如果 Stream 数量为 0，使用 CAS 操作防止重复放入
+//  4. 按质量评分降序插入到空闲池中（高质量连接在前）
+//
+// 参数：
+//   - item: 要释放的连接项
+//
+// 注意：
+//   - 使用 CAS 操作确保连接不会被重复放入空闲池
+//   - 连接的 managerByConn 条目不会被删除，由 messageLoop 负责清理
+//   - 多次调用此方法是安全的（CAS 操作保证幂等性）
 func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1471,8 +1699,22 @@ func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 // 亲和性分数管理
 // ============================================================================
 
-// UpdateAffinityScore 更新亲和分数
-// success: true 表示成功，false 表示失败
+// UpdateAffinityScore 更新连接对目标地址的亲和分数。
+//
+// UpdateAffinityScore 根据请求成功或失败调整连接对特定目标地址的亲和分数，
+// 用于负载均衡时优先选择已经服务过该目标的连接（缓存命中优化）。
+//
+// 评分规则：
+//   - 成功：分数 +10
+//   - 失败：分数 -50
+//   - 负分数自动重置为 0
+//
+// 参数：
+//   - conn: 连接项
+//   - targetAddr: 目标地址（格式：host:port）
+//   - success: 请求是否成功
+//
+// 并发安全：使用 affinityMu 互斥锁保护。
 func (p *ConnectionPool) UpdateAffinityScore(conn *ConnItem, targetAddr string, success bool) {
 	if targetAddr == "" {
 		return
@@ -1500,7 +1742,18 @@ func (p *ConnectionPool) UpdateAffinityScore(conn *ConnItem, targetAddr string, 
 	}
 }
 
-// GetAffinityScore 获取连接对目标的亲和分数
+// GetAffinityScore 获取连接对目标地址的亲和分数。
+//
+// GetAffinityScore 返回连接对特定目标地址的亲和分数，用于负载均衡时
+// 优先选择已经服务过该目标的连接（缓存命中优化）。
+//
+// 参数：
+//   - conn: 连接项
+//   - targetAddr: 目标地址（格式：host:port）
+//
+// 返回值：亲和分数（int64），如果没有记录返回 0。
+//
+// 并发安全：使用 affinityMu 读锁保护。
 func (p *ConnectionPool) GetAffinityScore(conn *ConnItem, targetAddr string) int64 {
 	if targetAddr == "" {
 		return 0
@@ -1520,8 +1773,14 @@ func (p *ConnectionPool) GetAffinityScore(conn *ConnItem, targetAddr string) int
 	return p.connAffinityScore[conn][targetAddr]
 }
 
-// GetAllActiveConnections 获取所有活跃连接（包括空闲和正在使用的）
-// 用于 metrics 暴露和流量统计
+// GetAllActiveConnections 获取所有活跃连接。
+//
+// GetAllActiveConnections 返回所有活跃的 WebSocket 连接，包括空闲池中的连接
+// 和正在使用的连接。主要用于 Metrics 暴露和流量统计。
+//
+// 返回值：所有活跃连接的切片。
+//
+// 并发安全：使用 mu 读锁保护。
 func (p *ConnectionPool) GetAllActiveConnections() []*ConnItem {
 	p.mu.RLock()
 	result := make([]*ConnItem, 0, len(p.pool)+len(p.managerByConn))
@@ -1549,7 +1808,19 @@ func (p *ConnectionPool) GetAllActiveConnections() []*ConnItem {
 	return unique
 }
 
-// RegisterStreamHandler 注册流处理器（支持目标地址亲和性）
+// RegisterStreamHandler 注册 Stream 的消息处理器。
+//
+// RegisterStreamHandler 为指定的 Stream 注册消息处理回调函数，用于处理该 Stream
+// 接收到的消息（CONNECTED、DATA、CLOSE 等）。如果连接的 StreamManager 不存在，
+// 会自动创建。在多路复用模式下，还会记录目标地址亲和性。
+//
+// 参数：
+//   - item: 连接项
+//   - streamID: Stream ID（0-255）
+//   - handler: 消息处理器（包含 OnMessage、OnClose、OnCleanup 回调）
+//   - targetAddr: 目标地址（格式：host:port）
+//
+// 并发安全：使用 mu 互斥锁保护。
 func (p *ConnectionPool) RegisterStreamHandler(item *ConnItem, streamID byte, handler *StreamHandler, targetAddr string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1583,8 +1854,20 @@ func (p *ConnectionPool) RegisterStreamHandler(item *ConnItem, streamID byte, ha
 	}
 }
 
-// AllocateStreamID 分配一个新的 Stream ID（阻塞等待可用）
-// 返回分配的 Stream ID 和是否成功（false 表示超时）
+// AllocateStreamID 分配一个新的 Stream ID。
+//
+// AllocateStreamID 为指定连接分配一个空闲的 Stream ID（0-255），
+// 如果所有 Stream ID 都已占用，会阻塞等待直到有空闲 Stream 或超时。
+// 使用位图算法实现 O(1) 时间复杂度的 Stream ID 分配。
+//
+// 参数：
+//   - item: 连接项
+//   - targetAddr: 目标地址（用于日志和调试）
+//   - timeout: 分配超时时间
+//
+// 返回值：
+//   - byte: 分配的 Stream ID
+//   - bool: 是否成功分配（超时返回 false）
 func (p *ConnectionPool) AllocateStreamID(item *ConnItem, targetAddr string, timeout time.Duration) (byte, bool) {
 	p.mu.Lock()
 
@@ -1607,8 +1890,18 @@ func (p *ConnectionPool) AllocateStreamID(item *ConnItem, targetAddr string, tim
 	return mgr.AllocateStream(targetAddr, timeout)
 }
 
-// UnregisterStreamHandler 注销流处理器
-// 返回目标地址（用于清理亲和性映射）和是否该连接已无活跃 stream
+// UnregisterStreamHandler 注销 Stream 的消息处理器。
+//
+// UnregisterStreamHandler 从 StreamManager 中移除指定的 Stream，释放 Stream ID，
+// 并调用清理回调函数。同时更新连接的 Stream 计数和目标地址亲和性映射。
+//
+// 参数：
+//   - item: 连接项
+//   - streamID: 要注销的 Stream ID
+//
+// 返回值：
+//   - targetAddr: 目标地址（用于清理亲和性映射）
+//   - isEmpty: 该连接是否已无活跃 Stream
 func (p *ConnectionPool) UnregisterStreamHandler(item *ConnItem, streamID byte) (targetAddr string, isEmpty bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -2096,7 +2389,21 @@ func (p *ConnectionPool) adjustPoolSize() {
 	}
 }
 
-// GetEnhancedStats 获取增强统计信息
+// GetEnhancedStats 获取增强的连接池统计信息。
+//
+// GetEnhancedStats 返回连接池的详细统计信息，包括请求统计、响应时间、
+// 流量统计、连接数统计等。所有统计字段使用原子操作读取，确保并发安全。
+//
+// 统计信息包括：
+//   - 请求统计：总请求数、成功数、失败数、超时数、成功率
+//   - 响应时间：平均、最小、最大响应时间（毫秒）
+//   - 流量统计：发送/接收字节数（包括已关闭连接和活跃连接）
+//   - 连接统计：创建/关闭连接数、池大小、活跃连接数、排队请求数
+//   - 运行时间：连接池启动以来的运行时间
+//
+// 返回值：PoolStatsInfo 结构体，包含所有统计信息。
+//
+// 并发安全：使用原子操作和读锁保护。
 func (p *ConnectionPool) GetEnhancedStats() PoolStatsInfo {
 	// 使用原子操作读取所有统计字段，避免数据竞争
 	requests := atomic.LoadInt64(&p.stats.Requests)
@@ -2155,13 +2462,28 @@ func (p *ConnectionPool) GetEnhancedStats() PoolStatsInfo {
 	}
 }
 
-// RecordRequestStart 记录请求开始
+// RecordRequestStart 记录请求开始。
+//
+// RecordRequestStart 增加请求计数，并返回当前时间戳（毫秒），
+// 用于后续计算响应时间。
+//
+// 返回值：当前时间戳（毫秒）。
+//
+// 并发安全：使用原子操作。
 func (p *ConnectionPool) RecordRequestStart() int64 {
 	atomic.AddInt64(&p.stats.Requests, 1)
 	return time.Now().UnixMilli()
 }
 
-// RecordRequestSuccess 记录请求成功
+// RecordRequestSuccess 记录请求成功。
+//
+// RecordRequestSuccess 增加成功计数，计算响应时间并累加到总响应时间，
+// 同时更新最小和最大响应时间。使用 CAS 循环确保最小/最大值更新的原子性。
+//
+// 参数：
+//   - startTime: 请求开始时间戳（毫秒），由 RecordRequestStart 返回
+//
+// 并发安全：使用原子操作和 CAS 循环。
 func (p *ConnectionPool) RecordRequestSuccess(startTime int64) {
 	atomic.AddInt64(&p.stats.Successes, 1)
 	responseTime := time.Now().UnixMilli() - startTime
@@ -2191,24 +2513,45 @@ func (p *ConnectionPool) RecordRequestSuccess(startTime int64) {
 	}
 }
 
-// RecordRequestFailure 记录请求失败
+// RecordRequestFailure 记录请求失败。
+//
+// RecordRequestFailure 增加失败计数，用于统计请求失败率。
+//
+// 并发安全：使用原子操作。
 func (p *ConnectionPool) RecordRequestFailure() {
 	atomic.AddInt64(&p.stats.Failures, 1)
 }
 
-// RecordRequestTimeout 记录请求超时
+// RecordRequestTimeout 记录请求超时。
+//
+// RecordRequestTimeout 增加超时计数，用于统计请求超时率。
+//
+// 并发安全：使用原子操作。
 func (p *ConnectionPool) RecordRequestTimeout() {
 	atomic.AddInt64(&p.stats.Timeouts, 1)
 }
 
-// RecordDataTransfer 记录数据传输
+// RecordDataTransfer 记录数据传输。
+//
+// RecordDataTransfer 增加发送和接收的字节数统计，用于流量监控。
+//
+// 参数：
+//   - sent: 发送的字节数
+//   - received: 接收的字节数
+//
+// 并发安全：使用原子操作。
 func (p *ConnectionPool) RecordDataTransfer(sent, received int64) {
 	atomic.AddInt64(&p.stats.BytesSent, sent)
 	atomic.AddInt64(&p.stats.BytesReceived, received)
 }
 
-// UpdateAllRates 更新所有连接的速率统计
-// 直接访问 managerByConn，避免调用 GetAllActiveConnections() 造成额外开销
+// UpdateAllRates 更新所有连接的速率统计。
+//
+// UpdateAllRates 遍历所有活跃连接，调用其 Traffic.UpdateRates 方法更新
+// 发送/接收速率统计。直接访问 managerByConn 映射，避免调用
+// GetAllActiveConnections() 造成额外的内存分配开销。
+//
+// 并发安全：使用 mu 读锁保护连接列表的读取。
 func (p *ConnectionPool) UpdateAllRates() {
 	now := time.Now()
 
@@ -2224,12 +2567,28 @@ func (p *ConnectionPool) UpdateAllRates() {
 	}
 }
 
-// GetStats 获取统计信息指针（用于原子操作访问）
+// GetStats 获取统计信息指针。
+//
+// GetStats 返回连接池的统计信息结构体指针，用于原子操作访问统计字段。
+// 调用方可以使用 atomic 包的函数读取或修改统计字段。
+//
+// 返回值：PoolStats 结构体指针。
 func (p *ConnectionPool) GetStats() *PoolStats {
 	return &p.stats
 }
 
-// Close 关闭连接池
+// Close 关闭连接池。
+//
+// Close 停止连接池的所有后台维护循环，关闭所有 WebSocket 连接，
+// 并释放相关资源。调用此方法后，连接池实例不应再被使用。
+//
+// 清理步骤：
+//  1. 关闭 stopChan 通道，停止后台维护循环
+//  2. 停止会话轮换器（如果启用）
+//  3. 关闭空闲池中的所有连接
+//  4. 关闭活跃连接，并调用 StreamManager 的 HandleConnectionClose
+//
+// 并发安全：使用 mu 互斥锁保护。
 func (p *ConnectionPool) Close() {
 	close(p.stopChan)
 
@@ -2252,7 +2611,17 @@ func (p *ConnectionPool) Close() {
 	p.managerByConn = nil
 }
 
-// PoolStatsInfo 连接池统计信息
+// PoolStatsInfo 表示连接池统计信息的快照。
+//
+// PoolStatsInfo 包含连接池的详细统计信息，由 GetEnhancedStats 方法返回。
+// 所有字段都是快照值，反映调用时刻的状态。
+//
+// 统计字段：
+//   - 请求统计：Requests（总数）、Successes（成功）、Failures（失败）、Timeouts（超时）、SuccessRate（成功率%）
+//   - 响应时间：AvgResponseTime（平均）、MinResponseTime（最小）、MaxResponseTime（最大），单位毫秒
+//   - 流量统计：BytesSent（发送）、BytesReceived（接收），单位字节
+//   - 连接统计：CreatedConnections（创建）、ClosedConnections（关闭）、PoolSize（池大小）、ActiveConnections（活跃）、PendingConnections（建立中）
+//   - 其他：Uptime（运行时间）、QueuedRequests（排队请求数）
 type PoolStatsInfo struct {
 	Requests           int64
 	Successes          int64
@@ -2273,7 +2642,19 @@ type PoolStatsInfo struct {
 	QueuedRequests     int
 }
 
-// ConnectionData 连接数据（用于 metrics 暴露）
+// ConnectionData 表示单个连接的详细数据。
+//
+// ConnectionData 包含单个 WebSocket 连接的详细信息，由 GetConnectionsData 方法返回。
+// 主要用于 Metrics 暴露和监控，提供连接级别的统计数据。
+//
+// 字段说明：
+//   - ConnectionID: 连接标识（3 字节）
+//   - RelayAddr: 中转节点地址（格式：host:port）
+//   - RTT: 往返时延
+//   - Sent: 发送的字节数
+//   - Recv: 接收的字节数
+//   - StreamCount: 活跃 Stream 数量（空闲连接为 0）
+//   - RateSnapshot: 速率快照数据
 type ConnectionData struct {
 	ConnectionID []byte
 	RelayAddr    string
@@ -2284,7 +2665,16 @@ type ConnectionData struct {
 	RateSnapshot RateSnapshot // 速率快照数据
 }
 
-// RateSnapshot 速率快照数据
+// RateSnapshot 表示连接的速率快照数据。
+//
+// RateSnapshot 包含连接的发送和接收速率统计，嵌入在 ConnectionData 中。
+// 速率单位为字节/秒，由 TrafficCounter.GetRateSnapshot 方法计算。
+//
+// 字段说明：
+//   - AvgSent: 平均发送速率（字节/秒）
+//   - MaxSent: 最大发送速率（字节/秒）
+//   - AvgRecv: 平均接收速率（字节/秒）
+//   - MaxRecv: 最大接收速率（字节/秒）
 type RateSnapshot struct {
 	AvgSent float64 // 平均发送速率 (字节/秒)
 	MaxSent float64 // 最大发送速率 (字节/秒)
@@ -2292,8 +2682,19 @@ type RateSnapshot struct {
 	MaxRecv float64 // 最大接收速率 (字节/秒)
 }
 
-// GetConnectionsData 获取所有连接的数据（用于 metrics 暴露）
-// 返回包含流量统计和 stream 计数的连接数据列表
+// GetConnectionsData 获取所有连接的详细数据。
+//
+// GetConnectionsData 返回所有活跃连接的详细信息，包括连接标识、中转地址、
+// RTT、流量统计、Stream 数量和速率快照。主要用于 Metrics 暴露和监控。
+//
+// 数据来源：
+//   - 空闲池中的连接（Stream 数量为 0）
+//   - 活跃连接（从 StreamManager 获取 Stream 数量）
+//   - 自动过滤掉 closing 状态的连接
+//
+// 返回值：ConnectionData 切片，包含所有连接的详细信息。
+//
+// 并发安全：使用 mu 读锁保护。
 func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
 	p.mu.RLock()
 	result := make([]ConnectionData, 0, len(p.pool)+len(p.managerByConn))

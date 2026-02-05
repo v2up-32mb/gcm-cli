@@ -21,23 +21,30 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// DNS 记录类型常量
+// DNS 记录类型常量。
 const (
-	RecordTypeA     = 1
-	RecordTypeAAAA  = 28
-	RecordTypeHTTPS = 65
+	RecordTypeA     = 1  // A 记录 (IPv4)
+	RecordTypeAAAA  = 28 // AAAA 记录 (IPv6)
+	RecordTypeHTTPS = 65 // HTTPS 记录
 )
 
-// HTTPSRecord HTTPS 记录结构
+// HTTPSRecord 表示 HTTPS 资源记录 (RFC 9460)。
+//
+// HTTPS 记录用于发布 HTTPS 服务的元数据，包括 ECH 配置、ALPN 协议等。
 type HTTPSRecord struct {
-	Priority int
-	Target   string
-	Params   map[string]string
-	ECH      []byte // ECH 配置信息 (已解码)
-	raw      []byte // 原始记录数据
+	Priority int               // 优先级（0 表示别名模式）
+	Target   string            // 目标域名
+	Params   map[string]string // 服务参数（如 alpn, ech 等）
+	ECH      []byte            // ECH 配置信息（已解码）
+	raw      []byte            // 原始记录数据
 }
 
-// DoHClient DNS over HTTPS 客户端
+// DoHClient 表示 DNS over HTTPS 客户端。
+//
+// DoHClient 支持 RFC 8484 标准格式和 JSON API 格式（Google/Cloudflare）。
+// 可选启用代理模式，通过 WebSocket 隧道访问 DoH 服务。
+//
+// 并发安全：所有方法都是并发安全的。
 type DoHClient struct {
 	dohURL  string
 	client  *http.Client
@@ -45,7 +52,9 @@ type DoHClient struct {
 	log     *logger.Logger
 }
 
-// DoHResponse DoH 响应结构
+// DoHResponse 表示 DoH JSON API 的响应结构。
+//
+// 此结构用于解析 Google/Cloudflare 风格的 JSON API 响应。
 type DoHResponse struct {
 	Status   int  `json:"Status"`
 	TC       bool `json:"TC"`
@@ -64,7 +73,12 @@ type DoHResponse struct {
 	} `json:"Answer"`
 }
 
-// NewDoHClient 创建 DoH 客户端
+// NewDoHClient 创建并初始化 DoH 客户端。
+//
+// 参数:
+//   - cfg: 配置对象，包含 DoH URL 和启用状态
+//
+// 返回值: 初始化完成的 DoHClient 实例，默认超时 1 秒。
 func NewDoHClient(cfg *config.Config) *DoHClient {
 	return &DoHClient{
 		dohURL:  cfg.DoHUrl,
@@ -76,14 +90,29 @@ func NewDoHClient(cfg *config.Config) *DoHClient {
 	}
 }
 
-// EnableProxy 启用代理模式
-// proxyTransport 应该是 pool.ProxyTransport 实例
+// EnableProxy 启用代理模式，使 DoH 请求通过指定的传输层发送。
+//
+// 参数:
+//   - proxyTransport: HTTP 传输层实现（通常是 pool.ProxyTransport）
+//
+// 启用后，所有 DoH 请求将通过 WebSocket 隧道发送，解决 DoH 服务器被墙的问题。
 func (d *DoHClient) EnableProxy(proxyTransport http.RoundTripper) {
 	d.client.Transport = proxyTransport
 	d.log.Info("DoH 客户端已启用代理模式")
 }
 
-// Resolve 解析域名（支持 A/AAAA/HTTPS 记录）
+// Resolve 解析指定类型的 DNS 记录。
+//
+// 支持 A、AAAA 和 HTTPS 记录类型。优先使用 RFC 8484 标准格式，
+// 失败时自动回退到 JSON API 格式。包含重试机制处理 TLS 握手失败。
+//
+// 参数:
+//   - domain: 域名
+//   - queryType: 查询类型 ("A"、"AAAA" 或 "HTTPS")
+//
+// 返回值:
+//   - string: 解析结果（IP 地址或 HTTPS 记录的 wire format）
+//   - error: 解析错误（如果发生）
 func (d *DoHClient) Resolve(domain string, queryType string) (string, error) {
 	if !d.enabled {
 		d.log.Debug("DoH 未启用，跳过解析: %s (%s)", domain, queryType)
@@ -290,17 +319,38 @@ func (d *DoHClient) resolveRFC8484(ctx context.Context, domain string, queryType
 	return "", fmt.Errorf("no answer found")
 }
 
-// ResolveA 解析 A 记录 (IPv4)
+// ResolveA 解析 A 记录 (IPv4)。
+//
+// 参数:
+//   - domain: 域名
+//
+// 返回值:
+//   - string: IPv4 地址
+//   - error: 解析错误（如果发生）
 func (d *DoHClient) ResolveA(domain string) (string, error) {
 	return d.Resolve(domain, "A")
 }
 
-// ResolveAAAA 解析 AAAA 记录 (IPv6)
+// ResolveAAAA 解析 AAAA 记录 (IPv6)。
+//
+// 参数:
+//   - domain: 域名
+//
+// 返回值:
+//   - string: IPv6 地址
+//   - error: 解析错误（如果发生）
 func (d *DoHClient) ResolveAAAA(domain string) (string, error) {
 	return d.Resolve(domain, "AAAA")
 }
 
-// ResolveHTTPS 解析 HTTPS 记录
+// ResolveHTTPS 解析 HTTPS 记录。
+//
+// 参数:
+//   - domain: 域名
+//
+// 返回值:
+//   - *HTTPSRecord: 解析后的 HTTPS 记录对象
+//   - error: 解析错误（如果发生）
 func (d *DoHClient) ResolveHTTPS(domain string) (*HTTPSRecord, error) {
 	recordString, err := d.Resolve(domain, "HTTPS")
 	if err != nil {
@@ -309,7 +359,16 @@ func (d *DoHClient) ResolveHTTPS(domain string) (*HTTPSRecord, error) {
 	return parseHTTPSRecord(recordString)
 }
 
-// GetECHConfig 获取域名的 ECH 配置
+// GetECHConfig 获取域名的 ECH 配置。
+//
+// 通过解析 HTTPS 记录提取 ECH 配置数据。
+//
+// 参数:
+//   - domain: 域名
+//
+// 返回值:
+//   - []byte: ECH 配置数据
+//   - error: 如果 HTTPS 记录中不包含 ECH 配置，或解析失败
 func (d *DoHClient) GetECHConfig(domain string) ([]byte, error) {
 	record, err := d.ResolveHTTPS(domain)
 	if err != nil {
@@ -414,12 +473,22 @@ func (d *DoHClient) resolveJSON(ctx context.Context, domain string, queryType st
 	return "", fmt.Errorf("无解析结果")
 }
 
-// IsIPv6 检查是否为 IPv6 地址
+// IsIPv6 检查给定的 IP 地址字符串是否为 IPv6 地址。
+//
+// 参数:
+//   - ip: IP 地址字符串
+//
+// 返回值: 如果是 IPv6 地址返回 true，否则返回 false。
 func IsIPv6(ip string) bool {
 	return net.ParseIP(ip).To4() == nil
 }
 
-// FormatIPv6 格式化 IPv6 地址（添加方括号）
+// FormatIPv6 格式化 IPv6 地址，添加方括号（如果需要）。
+//
+// 参数:
+//   - ip: IP 地址字符串
+//
+// 返回值: 格式化后的 IP 地址（IPv6 会添加方括号，IPv4 保持不变）。
 func FormatIPv6(ip string) string {
 	if IsIPv6(ip) && !bytes.HasPrefix([]byte(ip), []byte("[")) {
 		return fmt.Sprintf("[%s]", ip)
@@ -427,7 +496,16 @@ func FormatIPv6(ip string) string {
 	return ip
 }
 
-// LookupIP 标准 DNS 查询（本地 DNS 解析）
+// LookupIP 使用系统 DNS 解析器查询域名的 IP 地址。
+//
+// 优先返回 IPv4 地址，然后返回 IPv6 地址。
+//
+// 参数:
+//   - host: 域名
+//
+// 返回值:
+//   - []string: IP 地址列表（IPv4 在前，IPv6 在后）
+//   - error: 解析错误（如果发生）
 func LookupIP(host string) ([]string, error) {
 	ips, err := net.LookupIP(host)
 	if err != nil {

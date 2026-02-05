@@ -1,3 +1,15 @@
+// Package metrics 提供 Prometheus 格式的监控指标暴露功能。
+//
+// 主要功能:
+//   - HTTP 端点暴露 Prometheus 格式指标
+//   - 连接池状态监控（空闲/活跃/排队）
+//   - 请求统计（成功率、延迟、超时）
+//   - DNS 缓存统计（命中率、大小）
+//   - 中转节点状态（延迟、负载、质量）
+//   - 流量统计（发送/接收速率）
+//   - 窗口流控和拥塞控制指标
+//   - 健康检查端点
+//   - 监控面板（Web UI）
 package metrics
 
 import (
@@ -15,7 +27,12 @@ import (
 	"gcm/relay"
 )
 
-// Server Metrics 服务器
+// Server 表示 Prometheus Metrics 服务器。
+//
+// Server 提供 HTTP 端点暴露系统运行指标，支持 Prometheus 抓取。
+// 包含超时保护机制，防止指标生成阻塞。
+//
+// 并发安全：所有公开方法都是并发安全的。
 type Server struct {
 	cfg          *config.Config
 	log          *logger.Logger
@@ -27,7 +44,15 @@ type Server struct {
 	mu           sync.RWMutex
 }
 
-// NewServer 创建 Metrics 服务器
+// NewServer 创建并初始化 Metrics 服务器。
+//
+// 参数:
+//   - cfg: 配置对象
+//   - p: WebSocket 连接池实例
+//   - rm: 中转节点管理器实例
+//   - dc: DNS 缓存实例
+//
+// 返回值: 初始化完成的 Server 实例（需要调用 Start 方法启动监听）。
 func NewServer(cfg *config.Config, p *pool.ConnectionPool, rm *relay.RelayManager, dc *dns.DNSCache) *Server {
 	return &Server{
 		cfg:          cfg,
@@ -38,7 +63,17 @@ func NewServer(cfg *config.Config, p *pool.ConnectionPool, rm *relay.RelayManage
 	}
 }
 
-// Start 启动 Metrics 服务器
+// Start 启动 Metrics HTTP 服务器。
+//
+// 在配置的端口上开始监听 HTTP 请求，提供以下端点：
+//   - /metrics - Prometheus 格式指标
+//   - /health - 健康检查
+//   - /monitor - 监控面板（Web UI）
+//   - /static/ - 静态文件服务
+//
+// 如果配置中禁用了 Metrics，此方法将直接返回 nil。
+//
+// 返回值: 监听失败时返回错误。
 func (s *Server) Start() error {
 	if !s.cfg.EnableMetrics {
 		s.log.Debug("Metrics 端点未启用")
@@ -491,7 +526,11 @@ func (s *Server) generateMetrics() string {
 	return result
 }
 
-// Close 关闭服务器
+// Close 关闭 Metrics HTTP 服务器。
+//
+// 停止监听新请求，现有请求会自然完成。
+//
+// 返回值: 关闭失败时返回错误。
 func (s *Server) Close() error {
 	if s.server != nil {
 		return s.server.Close()

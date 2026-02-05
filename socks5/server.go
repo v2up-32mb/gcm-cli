@@ -1,3 +1,12 @@
+// Package socks5 提供 SOCKS5 代理服务器实现。
+//
+// 主要功能:
+//   - SOCKS5 协议处理（认证、请求解析）
+//   - 支持 IPv4、IPv6 和域名地址类型
+//   - DNS 预解析和缓存
+//   - WebSocket 隧道建立和数据转发
+//   - 流量统计和质量监控
+//   - 窗口流控和亲和性路由
 package socks5
 
 import (
@@ -20,26 +29,39 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// SOCKS5 协议常量。
 const (
-	socks5Version = 0x05
-	authNone      = 0x00
-	cmdConnect    = 0x01
-	atypIPv4      = 0x01
-	atypDomain    = 0x03
-	atypIPv6      = 0x04
+	socks5Version = 0x05 // SOCKS5 版本号
+	authNone      = 0x00 // 无需认证
+	cmdConnect    = 0x01 // CONNECT 命令
+	atypIPv4      = 0x01 // IPv4 地址类型
+	atypDomain    = 0x03 // 域名地址类型
+	atypIPv6      = 0x04 // IPv6 地址类型
 )
 
-// Server SOCKS5 服务器
+// Server 表示 SOCKS5 代理服务器。
+//
+// Server 处理 SOCKS5 客户端连接，解析请求，通过 WebSocket 连接池
+// 建立到目标服务器的隧道，并进行双向数据转发。
+//
+// 并发安全：所有公开方法都是并发安全的。
 type Server struct {
 	cfg           *config.Config
 	log           *logger.Logger
 	pool          *pool.ConnectionPool
 	dnsCache      *dns.DNSCache
 	server        net.Listener
-	activeTunnels int32
+	activeTunnels int32 // 当前活跃隧道数（原子操作）
 }
 
-// NewServer 创建 SOCKS5 服务器
+// NewServer 创建并初始化 SOCKS5 代理服务器。
+//
+// 参数:
+//   - cfg: 配置对象
+//   - p: WebSocket 连接池实例
+//   - dc: DNS 缓存实例
+//
+// 返回值: 初始化完成的 Server 实例（需要调用 Start 方法启动监听）。
 func NewServer(cfg *config.Config, p *pool.ConnectionPool, dc *dns.DNSCache) *Server {
 	return &Server{
 		cfg:      cfg,
@@ -49,7 +71,11 @@ func NewServer(cfg *config.Config, p *pool.ConnectionPool, dc *dns.DNSCache) *Se
 	}
 }
 
-// Start 启动 SOCKS5 服务器
+// Start 启动 SOCKS5 代理服务器。
+//
+// 在配置的地址上开始监听 TCP 连接，并启动后台协程处理客户端连接。
+//
+// 返回值: 监听失败时返回错误。
 func (s *Server) Start() error {
 	listener, err := net.Listen("tcp", s.cfg.ListenAddress)
 	if err != nil {
@@ -494,7 +520,11 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	}
 }
 
-// Close 关闭服务器
+// Close 关闭 SOCKS5 代理服务器。
+//
+// 停止监听新连接，现有连接会自然关闭。
+//
+// 返回值: 关闭失败时返回错误。
 func (s *Server) Close() error {
 	if s.server != nil {
 		return s.server.Close()
