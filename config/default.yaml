@@ -28,9 +28,7 @@ dynamicPoolLowThreshold: 0.3    # 低负载阈值（活跃率 < 30%）
 dynamicPoolHighThreshold: 0.8   # 高负载阈值（利用率 > 80%）
 
 # ===== 中转节点配置 =====
-relayIPs:                       # 中转节点列表
-  - "36.140.124.162:10009"
-  - "v6.gh-proxy.org"
+relayIPs: []                     # 中转节点列表（留空则直连 Worker）
 relayMonitorInterval: "30s"     # 节点延迟监控间隔
 relayMaxLatency: "500ms"        # 节点最大可接受延迟
 relayFailureThreshold: 3        # 节点连续失败次数阈值

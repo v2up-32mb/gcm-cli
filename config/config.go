@@ -436,7 +436,7 @@ func DefaultConfig() *Config {
 		ConnectionTimeout: yamlDuration{time.Second},
 
 		// 中转节点配置
-		RelayIPs:                  []string{"36.140.124.162:10009", "v6.gh-proxy.org"},
+		RelayIPs:                  nil, // 默认不走中转，直连 Worker
 		RelayMonitorInterval:      yamlDuration{30 * time.Second},
 		RelayMaxLatency:           yamlDuration{500 * time.Millisecond},
 		RelayFailureThreshold:     3,
