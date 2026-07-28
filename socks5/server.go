@@ -273,7 +273,7 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	defer atomic.AddInt32(&s.activeTunnels, -1)
 
 	// 发送 CONNECT 消息（使用解析后的地址）
-	connectMsg := protocol.NewConnectMessage(wsID, streamID, resolvedHost, port)
+	connectMsg := protocol.NewConnectMessage(streamID, resolvedHost, port)
 	if err := connItem.WriteMessage(websocket.BinaryMessage, connectMsg.Encode()); err != nil {
 		s.log.Error("发送 CONNECT 消息失败: %v", err)
 		// 记录请求失败
@@ -299,7 +299,7 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			// 主动发送 CLOSE 消息到 Worker，通知 Stream 关闭
-			closeMsg := protocol.NewCloseMessage(wsID, streamID)
+			closeMsg := protocol.NewCloseMessage(streamID)
 			if err := connItem.WriteMessage(websocket.BinaryMessage, closeMsg.Encode()); err != nil {
 				s.log.Debug("发送 CLOSE 消息失败: %v", err)
 			} else {
@@ -437,7 +437,7 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 				bytesSent += int64(n)
 				// 更新连接流量统计（发送）
 				connItem.Traffic.AddSent(int64(n))
-				dataMsg := protocol.NewDataMessage(wsID, streamID, buf[:n])
+				dataMsg := protocol.NewDataMessage(streamID, buf[:n])
 				if err := connItem.WriteMessage(websocket.BinaryMessage, dataMsg.Encode()); err != nil {
 					cleanup()
 					return

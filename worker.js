@@ -4,13 +4,13 @@
  * 对应客户端: gcm.cjs
  * 功能: 通过 WebSocket 接收 SOCKS5 代理请求，转发到目标服务器
  *
- * 协议格式 (仅多路复用):
- * - 客户端 -> Worker: MUX:{streamId}:CONNECT:{host}:{port}|
- * - 客户端 -> Worker: MUX:{streamId}:DATA:{binary_data}
- * - 客户端 -> Worker: MUX:{streamId}:CLOSE
- * - Worker -> 客户端: MUX:{streamId}:CONNECTED
- * - Worker -> 客户端: MUX:{streamId}:DATA:{binary_data}
- * - Worker -> 客户端: MUX:{streamId}:CLOSE 或 MUX:{streamId}:ERROR:{msg}
+ * 协议格式 (2字节头, 仅多路复用):
+ * - 客户端 -> Worker: [STREAM_ID:1][TYPE:1=0][host:port|]
+ * - 客户端 -> Worker: [STREAM_ID:1][TYPE:1=2][binary_data]
+ * - 客户端 -> Worker: [STREAM_ID:1][TYPE:1=3]
+ * - Worker -> 客户端: [STREAM_ID:1][TYPE:1=1]
+ * - Worker -> 客户端: [STREAM_ID:1][TYPE:1=2][binary_data]
+ * - Worker -> 客户端: [STREAM_ID:1][TYPE:1=3]
  *
  * 部署说明:
  * 1. 登录 Cloudflare Dashboard
@@ -107,28 +107,9 @@ function safeCloseWebSocket(ws) {
 class StreamManager {
     constructor(webSocket) {
         this.webSocket = webSocket;
-        // streams: Map<streamId, { wsId, remoteSocket, remoteWriter, remoteReader, isClosed }>
+        // streams: Map<streamId, { remoteSocket, remoteWriter, remoteReader, isClosed }>
         this.streams = new Map();
         this.streamCount = 0;
-        // WS ID 将从第一条消息中提取
-        this.wsId = null;
-    }
-
-    /**
-     * 设置 WS ID（从客户端消息中提取）
-     */
-    setWsId(wsId) {
-        if (!this.wsId) {
-            this.wsId = wsId;
-            log('Mux', `设置 WS ID: ${Array.from(wsId).map(b => b.toString(16).padStart(2, '0')).join('')}`);
-        }
-    }
-
-    /**
-     * 获取 WS ID
-     */
-    getWsId() {
-        return this.wsId;
     }
 
     /**
@@ -177,7 +158,6 @@ class StreamManager {
                 const remoteReader = remoteSocket.readable.getReader();
 
                 this.streams.set(streamId, {
-                    wsId: this.wsId,
                     remoteSocket,
                     remoteWriter,
                     remoteReader,
@@ -186,10 +166,10 @@ class StreamManager {
                 this.streamCount++;
 
                 log('Mux', `[${streamId}] ${attemptDesc}成功`);
-                this.sendConnected(this.wsId, streamId);
+                this.sendConnected(streamId);
 
                 // 启动数据转发
-                this.pumpRemoteToWebSocket(this.wsId, streamId, remoteReader);
+                this.pumpRemoteToWebSocket(streamId, remoteReader);
 
                 return true;
 
@@ -257,10 +237,9 @@ class StreamManager {
     /**
      * 发送 CONNECTED 响应
      */
-    sendConnected(wsId, streamId) {
+    sendConnected(streamId) {
         try {
             const header = new Uint8Array([
-                wsId[0], wsId[1], wsId[2],  // WS ID (3 bytes)
                 streamId,                     // Stream ID (1 byte)
                 MSG_TYPE.CONNECTED            // Type (1 byte)
             ]);
@@ -271,20 +250,19 @@ class StreamManager {
     /**
      * 发送错误响应
      */
-    sendError(wsId, streamId, errorMsg) {
+    sendError(streamId, errorMsg) {
         try {
             // 错误响应需要额外信息，暂时用 CLOSE 代替
-            this.sendClose(wsId, streamId);
+            this.sendClose(streamId);
         } catch {}
     }
 
     /**
      * 发送数据到客户端
      */
-    sendData(wsId, streamId, data) {
+    sendData(streamId, data) {
         try {
             const header = new Uint8Array([
-                wsId[0], wsId[1], wsId[2],  // WS ID (3 bytes)
                 streamId,                     // Stream ID (1 byte)
                 MSG_TYPE.DATA                  // Type (1 byte)
             ]);
@@ -298,10 +276,9 @@ class StreamManager {
     /**
      * 发送流关闭通知
      */
-    sendClose(wsId, streamId) {
+    sendClose(streamId) {
         try {
             const header = new Uint8Array([
-                wsId[0], wsId[1], wsId[2],  // WS ID (3 bytes)
                 streamId,                     // Stream ID (1 byte)
                 MSG_TYPE.CLOSE                 // Type (1 byte)
             ]);
@@ -312,14 +289,14 @@ class StreamManager {
     /**
      * 将远程 Socket 数据转发给 WebSocket
      */
-    async pumpRemoteToWebSocket(wsId, streamId, remoteReader) {
+    async pumpRemoteToWebSocket(streamId, remoteReader) {
         try {
             while (true) {
                 const { done, value } = await remoteReader.read();
 
                 if (done) break;
                 if (value?.byteLength > 0) {
-                    this.sendData(wsId, streamId, value);
+                    this.sendData(streamId, value);
                 }
             }
         } catch (e) {
@@ -327,7 +304,7 @@ class StreamManager {
         }
 
         // 转发结束，关闭流
-        this.sendClose(wsId, streamId);
+        this.sendClose(streamId);
         this.closeStream(streamId);
     }
 
@@ -401,7 +378,7 @@ async function handleSession(webSocket) {
     };
 
     // 协议头长度常量
-    const HEADER_LEN = 5;  // [WS_ID:3][STREAM_ID:1][TYPE:1]
+    const HEADER_LEN = 2;  // [STREAM_ID:1][TYPE:1]
 
     // 监听客户端消息
     webSocket.addEventListener('message', async (event) => {
@@ -419,27 +396,23 @@ async function handleSession(webSocket) {
             }
 
             // 解析头部
-            const wsId = uint8Array.slice(0, 3);     // 3 bytes: WS ID
-            const streamId = uint8Array[3];           // 1 byte: Stream ID
-            const msgType = uint8Array[4];           // 1 byte: Type
-
-            // 设置 WS ID（从客户端消息中提取）
-            streamManager.setWsId(wsId);
+            const streamId = uint8Array[0];           // 1 byte: Stream ID
+            const msgType = uint8Array[1];            // 1 byte: Type
 
             // 处理不同类型的消息
             if (msgType === MSG_TYPE.CONNECT) {
-                // CONNECT 消息: [WS_ID:3][STREAM_ID:1][TYPE:1]{host:port}|
+                // CONNECT 消息: [STREAM_ID:1][TYPE:1]{host:port}|
                 // 提取目标地址
                 const payload = decoder.decode(uint8Array.slice(HEADER_LEN));
                 const targetAddr = payload.substring(0, payload.lastIndexOf('|'));
                 log('Mux', `[${streamId.toString(16)}] 连接请求: ${targetAddr}`);
                 await streamManager.createStream(streamId, targetAddr);
             } else if (msgType === MSG_TYPE.DATA) {
-                // DATA 消息: [WS_ID:3][STREAM_ID:1][TYPE:1][binary_data]
+                // DATA 消息: [STREAM_ID:1][TYPE:1][binary_data]
                 const binaryData = uint8Array.slice(HEADER_LEN);
                 await streamManager.writeStream(streamId, binaryData);
             } else if (msgType === MSG_TYPE.CLOSE) {
-                // CLOSE 消息: [WS_ID:3][STREAM_ID:1][TYPE:1]
+                // CLOSE 消息: [STREAM_ID:1][TYPE:1]
                 log('Mux', `[${streamId.toString(16)}] 关闭流`);
                 streamManager.closeStream(streamId);
             } else {
