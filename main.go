@@ -159,27 +159,21 @@ func main() {
 }
 
 func printStartupInfo(log *logger.Logger) {
-	log.Info("========================================")
-	log.Info("  GCM 代理客户端启动中...")
-	log.Info("========================================")
-	log.Info("Worker: %s", cfg.WorkerHost)
-	log.Info("监听地址: %s", cfg.ListenAddress)
-	log.Info("DoH: %v (%s)", cfg.EnableDoH, cfg.DoHUrl)
-	log.Info("ECH: %v", cfg.EnableECH)
-	log.Info("连接池: Min=%d, Max=%d", cfg.MinPoolSize, cfg.MaxPoolSize)
-	log.Info("DNS缓存TTL: %d秒", int(cfg.GetDNSCacheTTL().Seconds()))
-	log.Info("日志级别: %s", cfg.LogLevel)
-	log.Info("连接池预热: %v", cfg.EnablePoolWarmup)
-	log.Info("断线重连: %v", cfg.EnableAutoReconnect)
-	log.Info("动态池调整: %v", cfg.EnableDynamicPool)
-	log.Info("多路复用: %v", cfg.EnableMultiplex)
-	log.Info("----------------------------------------")
+	log.Info("GCM 代理客户端 v1.0")
+	log.Info("Worker: %s | 监听: %s | DoH: %v", cfg.WorkerHost, cfg.ListenAddress, cfg.EnableDoH)
+	if cfg.EnableECH {
+		log.Info("ECH: 已启用 (%s)", cfg.ECHDomain)
+	}
+	if cfg.UserID != "" {
+		log.Info("用户ID: %s", cfg.UserID)
+	}
+	if len(cfg.RelayIPs) > 0 {
+		log.Info("中转节点: %d 个", len(cfg.RelayIPs))
+	}
 }
 
 func printReadyInfo(log *logger.Logger) {
-	log.Info("========================================")
-	log.Info("  服务已就绪，等待连接...")
-	log.Info("========================================")
+	log.Info("SOCKS5 代理已就绪: socks5://%s", cfg.ListenAddress)
 }
 
 func waitForSignal(log *logger.Logger) {

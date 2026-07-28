@@ -17,6 +17,7 @@ func DefineFlags() []cli.Flag {
 			Name:     "config",
 			Aliases:  []string{"c"},
 			Usage:    "配置文件路径 (YAML/JSON)",
+			Category: "基本",
 			OnlyOnce: true,
 		},
 
@@ -24,26 +25,31 @@ func DefineFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:     "worker",
 			Aliases:  []string{"w"},
-			Usage:    "Worker 地址 (必须指定)",
+			Usage:    "Cloudflare Worker 地址",
+			Value:    "gcm.ics.de5.net",
+			Category: "基本",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
 			Name:     "listen",
 			Aliases:  []string{"l"},
-			Usage:    "SOCKS5 监听地址 (如 :10080 或 0.0.0.0:10080)",
-			Value:    ":10080",
+			Usage:    "SOCKS5 监听地址 (如 :1080 或 0.0.0.0:1080)",
+			Value:    ":1080",
+			Category: "基本",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
 			Name:     "user-id",
 			Aliases:  []string{"u"},
 			Usage:    "用户鉴权ID",
+			Category: "基本",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
 			Name:     "log-level",
 			Usage:    "日志级别: DEBUG/INFO/WARN/ERROR",
 			Value:    "INFO",
+			Category: "基本",
 			OnlyOnce: true,
 		},
 
@@ -53,40 +59,47 @@ func DefineFlags() []cli.Flag {
 			Aliases:  []string{"d"},
 			Usage:    "DoH 服务地址",
 			Value:    "https://v.recipes/dns-query",
+			Category: "网络",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name:     "no-doh",
 			Usage:    "禁用 DoH",
+			Category: "网络",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name:     "dns-warmup",
 			Usage:    "启用 DNS 预热",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name:     "doh-proxy",
 			Usage:    "启用 DoH 通过代理访问",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 
 		// ===== 中转节点配置 =====
 		&cli.StringSliceFlag{
-			Name:    "relay",
-			Aliases: []string{"r"},
-			Usage:   "中转节点列表（可多次指定或逗号分隔）",
+			Name:     "relay",
+			Aliases:  []string{"r"},
+			Usage:    "中转节点列表（可多次指定或逗号分隔）",
+			Category: "网络",
 		},
 		&cli.IntFlag{
 			Name:     "min-pool",
 			Usage:    "最小连接池大小",
 			Value:    3,
+			Category: "连接池",
 			OnlyOnce: true,
 		},
 		&cli.IntFlag{
 			Name:     "max-pool",
 			Usage:    "最大连接池大小",
 			Value:    15,
+			Category: "连接池",
 			OnlyOnce: true,
 		},
 
@@ -94,16 +107,19 @@ func DefineFlags() []cli.Flag {
 		&cli.BoolFlag{
 			Name:     "no-warmup",
 			Usage:    "禁用连接池预热",
+			Category: "连接池",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name:     "no-reconnect",
 			Usage:    "禁用断线自动重连",
+			Category: "连接池",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name:     "no-dynamic-pool",
 			Usage:    "禁用动态池大小调整",
+			Category: "连接池",
 			OnlyOnce: true,
 		},
 
@@ -111,6 +127,7 @@ func DefineFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:     "log-file",
 			Usage:    "启用日志文件输出到指定路径",
+			Category: "日志",
 			OnlyOnce: true,
 		},
 
@@ -119,11 +136,13 @@ func DefineFlags() []cli.Flag {
 			Name:     "timeout",
 			Usage:    "隧道超时时间（秒）",
 			Value:    60,
+			Category: "网络",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name:     "no-mux",
 			Usage:    "禁用多路复用",
+			Category: "连接池",
 			OnlyOnce: true,
 		},
 
@@ -132,42 +151,49 @@ func DefineFlags() []cli.Flag {
 			Name:     "connection-ttl",
 			Usage:    "连接最大存活时间",
 			Value:    5 * time.Minute,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "connection-timeout",
 			Usage:    "连接超时时间",
 			Value:    time.Second,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "heartbeat-interval",
 			Usage:    "心跳间隔",
 			Value:    15 * time.Second,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "heartbeat-timeout",
 			Usage:    "心跳响应超时",
 			Value:    3 * time.Second,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "dns-cache-ttl",
 			Usage:    "DNS 缓存过期时间",
 			Value:    5 * time.Minute,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "relay-monitor-interval",
 			Usage:    "节点监控间隔",
 			Value:    30 * time.Second,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "relay-max-latency",
 			Usage:    "节点最大可接受延迟",
 			Value:    500 * time.Millisecond,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 
@@ -176,24 +202,28 @@ func DefineFlags() []cli.Flag {
 			Name:     "default-window-size",
 			Usage:    "默认窗口大小 (如 256KB, 1MB)",
 			Value:    "256KB",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
 			Name:     "min-window-size",
 			Usage:    "最小窗口大小 (如 32KB)",
 			Value:    "32KB",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
 			Name:     "max-window-size",
 			Usage:    "最大窗口大小 (如 1MB)",
 			Value:    "1MB",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.DurationFlag{
 			Name:     "window-timeout",
 			Usage:    "窗口等待超时时间",
 			Value:    5 * time.Second,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 
@@ -202,6 +232,7 @@ func DefineFlags() []cli.Flag {
 			Name:     "congestion-control-interval",
 			Usage:    "拥塞控制检查间隔",
 			Value:    time.Minute,
+			Category: "高级",
 			OnlyOnce: true,
 		},
 
@@ -210,12 +241,14 @@ func DefineFlags() []cli.Flag {
 			Name:     "enable-ech",
 			Aliases:  []string{"e"},
 			Usage:    "启用 TLS ECH (Encrypted Client Hello)",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
 			Name:     "ech-domain",
 			Usage:    "ECH 隐藏域名",
 			Value:    "cloudflare-ech.com",
+			Category: "高级",
 			OnlyOnce: true,
 		},
 	}
