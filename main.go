@@ -14,7 +14,6 @@ import (
 	"gcm/dns"
 	"gcm/ech"
 	"gcm/logger"
-	"gcm/metrics"
 	"gcm/pool"
 	"gcm/relay"
 	"gcm/socks5"
@@ -34,15 +33,13 @@ func (w *websocketLogger) Write(p []byte) (n int, err error) {
 }
 
 var (
-	cfg             *config.Config
-	relayManager    *relay.RelayManager
-	dnsCache        *dns.DNSCache
-	dohClient       *dns.DoHClient
-	echManager      *ech.EchManager
-	connPool        *pool.ConnectionPool
-	qualityMonitor  *pool.ConnectionQualityMonitor
-	socks5Server    *socks5.Server
-	metricsSrv      *metrics.Server
+	cfg          *config.Config
+	relayManager *relay.RelayManager
+	dnsCache     *dns.DNSCache
+	dohClient    *dns.DoHClient
+	echManager   *ech.EchManager
+	connPool     *pool.ConnectionPool
+	socks5Server *socks5.Server
 )
 
 func main() {
@@ -147,33 +144,12 @@ func main() {
 	defer socks5Server.Close()
 	log.Debug("SOCKS5 服务器启动完成")
 
-	// 启动 Metrics 服务器（可选）
-	if cfg.EnableMetrics {
-		log.Info("正在启动 Metrics 服务器...")
-		metricsSrv = metrics.NewServer(cfg, connPool, relayManager, dnsCache)
-		if err := metricsSrv.Start(); err != nil {
-			log.Error("启动 Metrics 服务器失败: %v", err)
-		} else {
-			log.Debug("Metrics 服务器启动完成")
-			defer metricsSrv.Close()
-		}
-	}
-
 	// 启动 ECH 定时刷新任务（如果启用）
 	if cfg.EnableECH && echManager != nil {
 		log.Info("正在启动 ECH 定时刷新任务...")
 		echManager.StartAutoRefresh()
 		defer echManager.StopAutoRefresh()
 		log.Debug("ECH 定时刷新任务已启动")
-	}
-
-	// 启动连接质量监控器（如果启用）
-	if cfg.EnableQualityMonitor {
-		log.Info("正在启动连接质量监控器...")
-		qualityMonitor = pool.NewConnectionQualityMonitor(connPool, cfg, logger.GetLogger("QualityMonitor"))
-		qualityMonitor.Start()
-		defer qualityMonitor.Stop()
-		log.Debug("连接质量监控器已启动 (检查间隔: %v)", cfg.GetQualityCheckInterval())
 	}
 
 	printReadyInfo(log)
@@ -193,18 +169,10 @@ func printStartupInfo(log *logger.Logger) {
 	log.Info("连接池: Min=%d, Max=%d", cfg.MinPoolSize, cfg.MaxPoolSize)
 	log.Info("DNS缓存TTL: %d秒", int(cfg.GetDNSCacheTTL().Seconds()))
 	log.Info("日志级别: %s", cfg.LogLevel)
-	log.Info("Metrics: %v", cfg.EnableMetrics)
-	if cfg.EnableMetrics {
-		log.Info("Metrics 端口: %d", cfg.MetricsPort)
-	}
 	log.Info("连接池预热: %v", cfg.EnablePoolWarmup)
 	log.Info("断线重连: %v", cfg.EnableAutoReconnect)
 	log.Info("动态池调整: %v", cfg.EnableDynamicPool)
 	log.Info("多路复用: %v", cfg.EnableMultiplex)
-	log.Info("质量监控: %v", cfg.EnableQualityMonitor)
-	if cfg.EnableQualityMonitor {
-		log.Info("质量检查间隔: %v", cfg.GetQualityCheckInterval())
-	}
 	log.Info("----------------------------------------")
 }
 

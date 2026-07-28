@@ -725,38 +725,6 @@ type RelayStats struct {
 	WorstLatency time.Duration
 }
 
-// DetailedNodeInfo 节点详细信息（用于 Metrics）
-type DetailedNodeInfo struct {
-	IP                string
-	Port              int
-	ActiveConnections int32
-	TotalConnections  int64
-	AvgQualityScore   float64
-	Weight            float64
-}
-
-// GetDetailedNodes 获取所有节点的详细信息（用于 Metrics）
-func (rm *RelayManager) GetDetailedNodes() []DetailedNodeInfo {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
-	result := make([]DetailedNodeInfo, 0, len(rm.optimalRelays))
-	for _, node := range rm.optimalRelays {
-		// 实时计算权重
-		weight := rm.calculateWeight(node)
-
-		result = append(result, DetailedNodeInfo{
-			IP:                node.IP,
-			Port:              node.Port,
-			ActiveConnections: atomic.LoadInt32(&node.ActiveConnections),
-			TotalConnections:  atomic.LoadInt64(&node.TotalConnections),
-			AvgQualityScore:   node.AvgQualityScore,
-			Weight:            weight,
-		})
-	}
-
-	return result
-}
 
 // min 返回最小值
 func min(a, b int) int {

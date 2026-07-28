@@ -257,10 +257,6 @@ type Config struct {
 	HeartbeatTimeout  yamlDuration `yaml:"heartbeatTimeout" json:"heartbeatTimeout"`
 	EnableTcpNoDelay  bool         `yaml:"enableTcpNoDelay" json:"enableTcpNoDelay"`
 
-	// Metrics 配置
-	EnableMetrics bool `yaml:"enableMetrics" json:"enableMetrics"`
-	MetricsPort   int  `yaml:"metricsPort" json:"metricsPort"`
-
 	// 连接池预热配置
 	EnablePoolWarmup  bool         `yaml:"enablePoolWarmup" json:"enablePoolWarmup"`
 	WarmupConcurrency int          `yaml:"warmupConcurrency" json:"warmupConcurrency"`
@@ -287,9 +283,6 @@ type Config struct {
 	LogFilePath        string `yaml:"logFilePath" json:"logFilePath"`
 	LogFileMaxSize     int64  `yaml:"logFileMaxSize" json:"logFileMaxSize"`
 	LogFileBackupCount int    `yaml:"logFileBackupCount" json:"logFileBackupCount"`
-
-	// 统计增强配置
-	EnableStats bool `yaml:"enableStats" json:"enableStats"`
 
 	// 多路复用配置
 	EnableMultiplex         bool `yaml:"enableMultiplex" json:"enableMultiplex"`
@@ -470,10 +463,6 @@ func DefaultConfig() *Config {
 		HeartbeatTimeout:  yamlDuration{3 * time.Second},
 		EnableTcpNoDelay:  true,
 
-		// Metrics 配置
-		EnableMetrics: false,
-		MetricsPort:   9090,
-
 		// 连接池预热配置
 		EnablePoolWarmup:  true,
 		WarmupConcurrency: 3,
@@ -500,9 +489,6 @@ func DefaultConfig() *Config {
 		LogFilePath:        "./gcm.log",
 		LogFileMaxSize:     10 * 1024 * 1024,
 		LogFileBackupCount: 3,
-
-		// 统计增强配置
-		EnableStats: true,
 
 		// 多路复用配置
 		EnableMultiplex:         true,

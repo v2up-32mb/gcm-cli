@@ -45,9 +45,7 @@ enableTcpNoDelay: true
 # 日志级别
 logLevel: "INFO"
 # 是否启用指标采集
-enableMetrics: true
 # 指标服务端口
-metricsPort: 9090
 # 是否启用连接池预热
 enablePoolWarmup: true
 # 预热并发数
@@ -83,7 +81,6 @@ logFileMaxSize: 10485760
 # 日志文件备份数量
 logFileBackupCount: 3
 # 是否启用统计
-enableStats: true
 # 是否启用多路复用
 enableMultiplex: true
 # 每条连接的最大流数量

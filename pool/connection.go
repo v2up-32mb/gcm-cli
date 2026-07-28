@@ -220,18 +220,10 @@ type connRequest struct {
 
 // PoolStats 连接池统计
 type PoolStats struct {
-	Requests           int64
-	Successes          int64
-	Failures           int64
-	Timeouts           int64
-	TotalResponseTime  int64
-	MinResponseTime    int64
-	MaxResponseTime    int64
-	BytesReceived      int64
-	BytesSent          int64
 	StartTime          time.Time
 	CreatedConnections int64
 	ClosedConnections  int64
+	Failures           int64 // 连接创建失败计数
 }
 
 // NewConnectionPool 创建连接池
@@ -249,8 +241,7 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr 
 		currentMinPoolSize: int32(cfg.MinPoolSize),
 		stopChan:           make(chan struct{}),
 		stats: PoolStats{
-			StartTime:       time.Now(),
-			MinResponseTime: -1,
+			StartTime: time.Now(),
 		},
 	}
 
@@ -262,7 +253,6 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager, echMgr 
 	go p.cullLoop()
 	go p.statsLoop()
 	go p.heartbeatLoop()
-	go p.trafficReportLoop()
 	go p.rateUpdateLoop()
 	go p.congestionControlLoop() // 拥塞控制循环
 
@@ -1685,37 +1675,6 @@ func (p *ConnectionPool) sendHeartbeat() {
 	}
 }
 
-// trafficReportLoop 定期报告连接流量统计
-func (p *ConnectionPool) trafficReportLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			p.logConnectionTraffic()
-		case <-p.stopChan:
-			return
-		}
-	}
-}
-
-// logConnectionTraffic 输出所有活跃连接的流量统计
-func (p *ConnectionPool) logConnectionTraffic() {
-	connData := p.GetConnectionsData()
-	if len(connData) == 0 {
-		return
-	}
-
-	p.log.Debug("========== 连接流量统计 ==========")
-	for _, cd := range connData {
-		connIDStr := fmt.Sprintf("%02x%02x%02x", cd.ConnectionID[0], cd.ConnectionID[1], cd.ConnectionID[2])
-		p.log.Debug("WS[%s] → %s | ↑ %s | ↓ %s | Streams: %d",
-			connIDStr, cd.RelayAddr,
-			formatBytes(cd.Sent), formatBytes(cd.Recv), cd.StreamCount)
-	}
-	p.log.Debug("==================================")
-}
 
 // rateUpdateLoop 定期更新所有连接的速率统计
 func (p *ConnectionPool) rateUpdateLoop() {
@@ -1791,116 +1750,7 @@ func (p *ConnectionPool) adjustPoolSize() {
 	}
 }
 
-// GetEnhancedStats 获取增强统计信息
-func (p *ConnectionPool) GetEnhancedStats() PoolStatsInfo {
-	// 使用原子操作读取所有统计字段，避免数据竞争
-	requests := atomic.LoadInt64(&p.stats.Requests)
-	successes := atomic.LoadInt64(&p.stats.Successes)
-	failures := atomic.LoadInt64(&p.stats.Failures)
-	timeouts := atomic.LoadInt64(&p.stats.Timeouts)
-	totalResponseTime := atomic.LoadInt64(&p.stats.TotalResponseTime)
-	minResponseTime := atomic.LoadInt64(&p.stats.MinResponseTime)
-	maxResponseTime := atomic.LoadInt64(&p.stats.MaxResponseTime)
-	bytesSent := atomic.LoadInt64(&p.stats.BytesSent)
-	bytesReceived := atomic.LoadInt64(&p.stats.BytesReceived)
-	createdConnections := atomic.LoadInt64(&p.stats.CreatedConnections)
-	closedConnections := atomic.LoadInt64(&p.stats.ClosedConnections)
 
-	// 累加当前活跃连接的流量（总流量 = 已关闭连接流量 + 存活连接流量）
-	p.mu.RLock()
-	for conn := range p.managerByConn {
-		sent, recv, _ := conn.Traffic.GetSnapshot()
-		bytesSent += sent
-		bytesReceived += recv
-	}
-	p.mu.RUnlock()
-
-	uptime := time.Since(p.stats.StartTime)
-
-	// 计算成功率（使用原子读取的值）
-	successRate := 0.0
-	if requests > 0 {
-		successRate = float64(successes) / float64(requests) * 100
-	}
-
-	// 计算平均响应时间（使用原子读取的值）
-	avgResponseTime := 0.0
-	if successes > 0 {
-		avgResponseTime = float64(totalResponseTime) / float64(successes)
-	}
-
-	return PoolStatsInfo{
-		Requests:           requests,
-		Successes:          successes,
-		Failures:           failures,
-		Timeouts:           timeouts,
-		SuccessRate:        successRate,
-		AvgResponseTime:    avgResponseTime,
-		MinResponseTime:    float64(minResponseTime),
-		MaxResponseTime:    float64(maxResponseTime),
-		BytesSent:          bytesSent,
-		BytesReceived:      bytesReceived,
-		Uptime:             uptime,
-		CreatedConnections: createdConnections,
-		ClosedConnections:  closedConnections,
-		PoolSize:           len(p.pool),
-		ActiveConnections:  int(atomic.LoadInt32(&p.activeConnections)),
-		PendingConnections: int(atomic.LoadInt32(&p.pendingConnections)),
-		QueuedRequests:     len(p.requestQueue),
-	}
-}
-
-// RecordRequestStart 记录请求开始
-func (p *ConnectionPool) RecordRequestStart() int64 {
-	atomic.AddInt64(&p.stats.Requests, 1)
-	return time.Now().UnixMilli()
-}
-
-// RecordRequestSuccess 记录请求成功
-func (p *ConnectionPool) RecordRequestSuccess(startTime int64) {
-	atomic.AddInt64(&p.stats.Successes, 1)
-	responseTime := time.Now().UnixMilli() - startTime
-	atomic.AddInt64(&p.stats.TotalResponseTime, responseTime)
-
-	// 更新最小/最大响应时间
-	for {
-		min := atomic.LoadInt64(&p.stats.MinResponseTime)
-		if min == -1 || responseTime < min {
-			if atomic.CompareAndSwapInt64(&p.stats.MinResponseTime, min, responseTime) {
-				break
-			}
-		} else {
-			break
-		}
-	}
-
-	for {
-		max := atomic.LoadInt64(&p.stats.MaxResponseTime)
-		if responseTime > max {
-			if atomic.CompareAndSwapInt64(&p.stats.MaxResponseTime, max, responseTime) {
-				break
-			}
-		} else {
-			break
-		}
-	}
-}
-
-// RecordRequestFailure 记录请求失败
-func (p *ConnectionPool) RecordRequestFailure() {
-	atomic.AddInt64(&p.stats.Failures, 1)
-}
-
-// RecordRequestTimeout 记录请求超时
-func (p *ConnectionPool) RecordRequestTimeout() {
-	atomic.AddInt64(&p.stats.Timeouts, 1)
-}
-
-// RecordDataTransfer 记录数据传输
-func (p *ConnectionPool) RecordDataTransfer(sent, received int64) {
-	atomic.AddInt64(&p.stats.BytesSent, sent)
-	atomic.AddInt64(&p.stats.BytesReceived, received)
-}
 
 // UpdateAllRates 更新所有连接的速率统计
 // 直接访问 managerByConn，避免调用 GetAllActiveConnections() 造成额外开销
@@ -1942,106 +1792,8 @@ func (p *ConnectionPool) Close() {
 	p.managerByConn = nil
 }
 
-// PoolStatsInfo 连接池统计信息
-type PoolStatsInfo struct {
-	Requests           int64
-	Successes          int64
-	Failures           int64
-	Timeouts           int64
-	SuccessRate        float64
-	AvgResponseTime    float64
-	MinResponseTime    float64
-	MaxResponseTime    float64
-	BytesSent          int64
-	BytesReceived      int64
-	Uptime             time.Duration
-	CreatedConnections int64
-	ClosedConnections  int64
-	PoolSize           int
-	ActiveConnections  int
-	PendingConnections int
-	QueuedRequests     int
-}
 
-// ConnectionData 连接数据（用于 metrics 暴露）
-type ConnectionData struct {
-	ConnectionID []byte
-	RelayAddr    string
-	RTT          time.Duration
-	Sent         int64
-	Recv         int64
-	StreamCount  int          // 使用 StreamManager.GetStreamCount() 作为权威来源
-	RateSnapshot RateSnapshot // 速率快照数据
-}
 
-// RateSnapshot 速率快照数据
-type RateSnapshot struct {
-	AvgSent float64 // 平均发送速率 (字节/秒)
-	MaxSent float64 // 最大发送速率 (字节/秒)
-	AvgRecv float64 // 平均接收速率 (字节/秒)
-	MaxRecv float64 // 最大接收速率 (字节/秒)
-}
-
-// GetConnectionsData 获取所有连接的数据（用于 metrics 暴露）
-// 返回包含流量统计和 stream 计数的连接数据列表
-func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
-	p.mu.RLock()
-	result := make([]ConnectionData, 0, len(p.pool)+len(p.managerByConn))
-
-	// 从空闲池获取连接
-	for _, conn := range p.pool {
-		sent, recv, _ := conn.Traffic.GetSnapshot()
-		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
-		result = append(result, ConnectionData{
-			ConnectionID: conn.ConnectionID,
-			RelayAddr:    conn.RelayAddr,
-			RTT:          time.Duration(conn.RTT.Load()),
-			Sent:         sent,
-			Recv:         recv,
-			StreamCount:  0, // 空闲连接没有 stream
-			RateSnapshot: RateSnapshot{
-				AvgSent: avgSent,
-				MaxSent: maxSent,
-				AvgRecv: avgRecv,
-				MaxRecv: maxRecv,
-			},
-		})
-	}
-
-	// 从 managerByConn 获取连接及其 stream 计数
-	for conn, mgr := range p.managerByConn {
-		sent, recv, _ := conn.Traffic.GetSnapshot()
-		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
-		result = append(result, ConnectionData{
-			ConnectionID: conn.ConnectionID,
-			RelayAddr:    conn.RelayAddr,
-			RTT:          time.Duration(conn.RTT.Load()),
-			Sent:         sent,
-			Recv:         recv,
-			StreamCount:  mgr.GetStreamCount(), // 使用 StreamManager.GetStreamCount() 作为权威来源
-			RateSnapshot: RateSnapshot{
-				AvgSent: avgSent,
-				MaxSent: maxSent,
-				AvgRecv: avgRecv,
-				MaxRecv: maxRecv,
-			},
-		})
-	}
-	p.mu.RUnlock()
-
-	// 去重（同一连接可能同时存在于 pool 和 managerByConn）
-	seen := make(map[string]struct{})
-	unique := make([]ConnectionData, 0, len(result))
-	for _, cd := range result {
-		connIDStr := fmt.Sprintf("%02x%02x%02x", cd.ConnectionID[0], cd.ConnectionID[1], cd.ConnectionID[2])
-		if _, exists := seen[connIDStr]; !exists {
-			seen[connIDStr] = struct{}{}
-			unique = append(unique, cd)
-		}
-	}
-
-	return unique
-}
 
 // min 返回最小值
 func min(a, b int) int {
@@ -2123,57 +1875,3 @@ func (p *ConnectionPool) adjustAllStreamsWindow() {
 	}
 }
 
-// GetFlowControlStats 获取窗口流控和拥塞控制统计
-func (p *ConnectionPool) GetFlowControlStats() (avgWindow, minWindow, maxWindow int64, avgRTT time.Duration, avgLossRate float64, streamCount int) {
-	p.mu.RLock()
-	managers := make([]*StreamManager, 0, len(p.managerByConn))
-	for _, mgr := range p.managerByConn {
-		managers = append(managers, mgr)
-	}
-	p.mu.RUnlock()
-
-	var totalWindow int64
-	var totalRTT time.Duration
-	var totalLossRate float64
-	minWindow = MaxWindowSize
-	maxWindow = MinWindowSize
-
-	for _, mgr := range managers {
-		mgr.mu.RLock()
-		streams := make([]*Stream, 0, len(mgr.streams))
-		for _, s := range mgr.streams {
-			streams = append(streams, s)
-		}
-		mgr.mu.RUnlock()
-
-		for _, stream := range streams {
-			windowSize := atomic.LoadInt64(&stream.windowSize)
-			totalWindow += windowSize
-			if windowSize < minWindow {
-				minWindow = windowSize
-			}
-			if windowSize > maxWindow {
-				maxWindow = windowSize
-			}
-
-			rtt := stream.GetAverageRTT()
-			if rtt > 0 {
-				totalRTT += rtt
-			}
-
-			totalLossRate += stream.GetLossRate()
-			streamCount++
-		}
-	}
-
-	if streamCount > 0 {
-		avgWindow = totalWindow / int64(streamCount)
-		avgRTT = totalRTT / time.Duration(streamCount)
-		avgLossRate = totalLossRate / float64(streamCount)
-	} else {
-		minWindow = 0
-		maxWindow = 0
-	}
-
-	return
-}

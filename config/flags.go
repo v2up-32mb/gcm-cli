@@ -90,19 +90,6 @@ func DefineFlags() []cli.Flag {
 			OnlyOnce: true,
 		},
 
-		// ===== Metrics 配置 =====
-		&cli.BoolFlag{
-			Name:     "metrics",
-			Usage:    "启用 Metrics 端点",
-			OnlyOnce: true,
-		},
-		&cli.IntFlag{
-			Name:     "metrics-port",
-			Usage:    "Metrics 端口",
-			Value:    9090,
-			OnlyOnce: true,
-		},
-
 		// ===== 连接池配置 =====
 		&cli.BoolFlag{
 			Name:     "no-warmup",
@@ -278,14 +265,6 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	}
 	if cmd.IsSet("max-pool") {
 		cfg.MaxPoolSize = cmd.Int("max-pool")
-	}
-
-	// ===== Metrics 配置 =====
-	if cmd.IsSet("metrics") && cmd.Bool("metrics") {
-		cfg.EnableMetrics = true
-	}
-	if cmd.IsSet("metrics-port") {
-		cfg.MetricsPort = cmd.Int("metrics-port")
 	}
 
 	// ===== 连接池配置 =====

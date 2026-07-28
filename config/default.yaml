@@ -58,8 +58,6 @@ heartbeatTimeout: "3s"          # 心跳响应超时
 enableTcpNoDelay: true          # 启用 TCP_NODELAY
 
 # ===== Metrics 配置 =====
-enableMetrics: false            # 是否启用 metrics 端点
-metricsPort: 9090               # metrics HTTP 端口
 
 # ===== 断线重连配置 =====
 enableAutoReconnect: true       # 是否启用断线自动重连
@@ -76,7 +74,6 @@ logFileMaxSize: 10485760        # 日志文件最大大小（字节，10MB）
 logFileBackupCount: 3           # 保留的日志备份数量
 
 # ===== 统计增强配置 =====
-enableStats: true               # 是否启用统计增强
 
 # ===== 多路复用配置 =====
 enableMultiplex: true           # 是否启用多路复用（需 Worker 端配合）

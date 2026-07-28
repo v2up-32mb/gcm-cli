@@ -246,19 +246,13 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	// 构造目标地址字符串（用于亲和性路由，使用解析后的地址）
 	targetAddr := fmt.Sprintf("%s:%d", resolvedHost, port)
 
-	// 记录请求开始
-	var requestStartTime int64
-	if s.cfg.EnableStats {
-		requestStartTime = s.pool.RecordRequestStart()
-	}
+	// 记录请求开始时间（用于延迟统计）
+	requestStartTime := time.Now()
 
 	// 原子化地获取连接并分配流 ID
 	connItem, streamID, err := s.pool.GetConnectionWithStream(ctx, targetAddr)
 	if err != nil {
-		s.log.Warn("获取连接+流失败: %v", err)
-		if s.cfg.EnableStats {
-			s.pool.RecordRequestFailure()
-		}
+		s.log.Warn("获取连接失败: %v", err)
 		return
 	}
 
@@ -276,11 +270,7 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	connectMsg := protocol.NewConnectMessage(streamID, resolvedHost, port)
 	if err := connItem.WriteMessage(websocket.BinaryMessage, connectMsg.Encode()); err != nil {
 		s.log.Error("发送 CONNECT 消息失败: %v", err)
-		// 记录请求失败
 		connItem.RecordFailure()
-		if s.cfg.EnableStats {
-			s.pool.RecordRequestFailure()
-		}
 		s.pool.UnregisterStreamHandler(connItem, streamID)
 		s.pool.ReleaseConnection(connItem)
 		return
@@ -306,12 +296,17 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 				s.log.Debug("发送 CLOSE 消息 -> Stream[%s]", streamIDStr)
 			}
 
-			if s.cfg.EnableStats && (bytesSent > 0 || bytesReceived > 0) {
-				s.pool.RecordDataTransfer(bytesSent, bytesReceived)
-			}
 			clientConn.Close()
 			targetAddr, _ := s.pool.UnregisterStreamHandler(connItem, streamID)
 			s.pool.ReleaseConnection(connItem)
+			elapsed := time.Since(requestStartTime)
+			if bytesSent > 0 || bytesReceived > 0 {
+				totalBytes := bytesSent + bytesReceived
+				speedKBps := float64(totalBytes) / 1024.0 / elapsed.Seconds()
+				s.log.Info("请求完成 -> %s:%d | WS[%s] Stream[%s] 耗时=%dms ↑%s ↓%s 速度=%.1fKB/s",
+					originalHost, port, connIDStr, streamIDStr, elapsed.Milliseconds(),
+					formatBytes(bytesSent), formatBytes(bytesReceived), speedKBps)
+			}
 			s.log.Debug("清理完成: WS[%s] Stream[%s] -> %s", connIDStr, streamIDStr, targetAddr)
 
 			// 通知主 goroutine 连接已关闭
@@ -338,17 +333,15 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 					connItem.Traffic.IncStream()
 					// 记录请求成功
 					connItem.RecordSuccess()
-					if s.cfg.EnableStats {
-						s.pool.RecordRequestSuccess(requestStartTime)
-					}
 					// 记录 Stream 级别的 RTT 和成功（从发送 CONNECT 到收到 CONNECTED）
+					connectLatency := time.Since(requestStartTime)
 					stream := s.pool.GetStream(connItem, streamID)
 					if stream != nil {
-						// requestStartTime 是 UnixMilli()，需要转换为 Duration
-						rtt := time.Duration(time.Now().UnixMilli()-requestStartTime) * time.Millisecond
-						stream.RecordRTT(rtt)
+						stream.RecordRTT(connectLatency)
 						stream.RecordSuccess()
 					}
+					s.log.Info("连接建立 -> %s:%d | WS[%s] Stream[%s] 延迟=%dms",
+						originalHost, port, connIDStr, streamIDStr, connectLatency.Milliseconds())
 					// 发送 SOCKS5 连接成功响应
 					if _, err := clientConn.Write([]byte{socks5Version, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 						s.log.Debug("发送 SOCKS5 响应失败: %v", err)
@@ -363,12 +356,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 						close(done)
 					}
 				} else if msg.Type == protocol.MsgTypeClose {
-					// 连接建立前收到 CLOSE，记录失败
+					// 连接建立前收到 CLOSE
 					connItem.RecordFailure()
-					if s.cfg.EnableStats {
-						s.pool.RecordRequestFailure()
-					}
-					// 记录 Stream 级别的超时
 					stream := s.pool.GetStream(connItem, streamID)
 					if stream != nil {
 						stream.RecordTimeout()
@@ -457,13 +446,9 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	case <-ctx.Done():
 		// 上下文超时或取消
 		if !connected {
-			s.log.Warn("隧道超时: %s:%d", originalHost, port)
-			// 记录请求失败
+			s.log.Warn("隧道超时: %s:%d | WS[%s] Stream[%s] 延迟=%dms",
+				originalHost, port, connIDStr, streamIDStr, time.Since(requestStartTime).Milliseconds())
 			connItem.RecordFailure()
-			if s.cfg.EnableStats {
-				s.pool.RecordRequestTimeout()
-			}
-			// 记录 Stream 级别的超时
 			stream := s.pool.GetStream(connItem, streamID)
 			if stream != nil {
 				stream.RecordTimeout()
@@ -473,12 +458,9 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	case <-closed:
 		// 连接在建立前就关闭了
 		if !connected {
-			s.log.Debug("连接在建立前关闭: %s:%d", originalHost, port)
+			s.log.Debug("连接在建立前关闭: %s:%d | WS[%s] Stream[%s]",
+				originalHost, port, connIDStr, streamIDStr)
 			connItem.RecordFailure()
-			if s.cfg.EnableStats {
-				s.pool.RecordRequestFailure()
-			}
-			// 记录 Stream 级别的超时
 			stream := s.pool.GetStream(connItem, streamID)
 			if stream != nil {
 				stream.RecordTimeout()
@@ -494,4 +476,18 @@ func (s *Server) Close() error {
 		return s.server.Close()
 	}
 	return nil
+}
+
+// formatBytes 将字节数格式化为人类可读的字符串
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for n2 := n; n2/unit >= unit && exp < 5; n2 /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
