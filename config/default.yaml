@@ -3,7 +3,7 @@
 # 使用方法: gcm-go -c config.yaml
 
 # ===== 基本配置 =====
-workerHost: "gcm.ics.de5.net"   # Worker 地址（内置默认值，零配置可用）
+workerHost: ""                  # Worker 地址（必须指定）
 listenAddress: ":1080"          # SOCKS5 监听地址
 userID: ""                      # 代理访问令牌（可选）
 logLevel: "INFO"                # 日志级别: DEBUG/INFO/WARN/ERROR

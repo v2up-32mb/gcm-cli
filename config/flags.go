@@ -25,8 +25,8 @@ func DefineFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:     "worker",
 			Aliases:  []string{"w"},
-			Usage:    "Cloudflare Worker 地址",
-			Value:    "gcm.ics.de5.net",
+			Usage:    "Cloudflare Worker 地址 (必须指定)",
+			Value:    "",
 			Category: "基本",
 			OnlyOnce: true,
 		},

@@ -424,7 +424,7 @@ func (c *Config) GetQualityRelaySwitchCooldown() time.Duration {
 func DefaultConfig() *Config {
 	return &Config{
 		// 基本配置
-		WorkerHost:    "gcm.ics.de5.net", // 内置默认 Worker 地址
+		WorkerHost:    "", // 必须通过 --worker 参数或配置文件指定
 		ListenAddress: ":1080",            // 标准 SOCKS5 端口
 		UserID:        "",                 // 无鉴权时留空
 		LogLevel:      INFO,

@@ -53,7 +53,12 @@ func LoadConfig() (*Config, error) {
 				return err
 			}
 
-			// 4. 设置全局配置
+			// 4. 验证配置
+			if cfg.WorkerHost == "" {
+				return fmt.Errorf("必须指定 Worker 地址（通过 --worker/-w 参数或配置文件设置）")
+			}
+
+			// 5. 设置全局配置
 			globalConfig = cfg
 			return nil
 		},
