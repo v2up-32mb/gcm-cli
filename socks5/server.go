@@ -88,6 +88,12 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 
+	// 设置 TCP_NODELAY，减少小数据包的 Nagle 延迟
+	// 对 SOCKS5 握手和 TLS ClientHello 等小包尤为重要
+	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
 	clientAddr := clientConn.RemoteAddr().String()
 	s.log.Debug("新客户端连接: %s", clientAddr)
 
