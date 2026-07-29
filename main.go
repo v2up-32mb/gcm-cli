@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"gcm/config"
 	"gcm/dns"
@@ -56,6 +55,7 @@ func main() {
 
 	// 初始化日志
 	logger.InitGlobalLogger(cfg)
+	defer logger.Close() // 确保在所有资源关闭后才关闭日志
 	log := logger.GetLogger("System")
 
 	printStartupInfo(log)
@@ -85,6 +85,15 @@ func main() {
 			cfg.GetECHRefreshInterval(),
 		)
 		log.Debug("ECH 管理器初始化完成 (查询域名: %s)", cfg.ECHDomain)
+
+		// M3: 在 DoH 代理启用前预取 ECH 配置，避免冷启动循环依赖
+		log.Debug("预取 ECH 配置 (通过直连 DoH)...")
+		if echConfig, err := dohClient.GetECHConfig(cfg.ECHDomain); err == nil {
+			echManager.CacheConfig(cfg.ECHDomain, echConfig)
+			log.Debug("ECH 配置预取成功")
+		} else {
+			log.Warn("ECH 配置预取失败: %v (将回退到标准 TLS)", err)
+		}
 	}
 
 	// 初始化连接池
@@ -102,12 +111,15 @@ func main() {
 	}
 
 	// 连接池预热（完全异步执行，确保不阻塞主线程）
+	// warmupDone channel 用于 DNS 预热等待连接池预热完成（替代硬编码 sleep）
+	warmupDone := make(chan struct{})
 	log.Debug("启动预热 goroutine...")
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("连接池预热 panic: %v", r)
 			}
+			close(warmupDone)
 		}()
 		log.Debug("预热 goroutine 开始执行")
 		if err := connPool.Warmup(); err != nil {
@@ -118,7 +130,7 @@ func main() {
 		log.Debug("预热 goroutine 退出")
 	}()
 
-	// DNS 缓存预热（异步执行）
+	// DNS 缓存预热（异步执行，等待连接池预热完成）
 	if cfg.EnableDNSWarmup {
 		go func() {
 			defer func() {
@@ -128,7 +140,7 @@ func main() {
 			}()
 			// 等待连接池预热完成后再预热 DNS
 			log.Debug("等待连接池预热后开始 DNS 预热...")
-			time.Sleep(3 * time.Second)
+			<-warmupDone
 			log.Info("开始 DNS 缓存预热...")
 			dnsCache.Warmup(cfg.DNSWarmupDomains)
 		}()
@@ -154,13 +166,19 @@ func main() {
 
 	printReadyInfo(log)
 
-	// 等待信号
+	// 等待信号并优雅关闭
 	waitForSignal(log)
+	// 函数返回后，所有 defer 按逆序执行：
+	// echManager.StopAutoRefresh → socks5Server.Close → connPool.Close
+	// → relayManager.Close → dnsCache.Close → logger.Close
 }
 
 func printStartupInfo(log *logger.Logger) {
 	log.Info("GCM 代理客户端 v1.0")
 	log.Info("Worker: %s | 监听: %s | DoH: %v", cfg.WorkerHost, cfg.ListenAddress, cfg.EnableDoH)
+	if cfg.ProxyIP != "" {
+		log.Info("出口代理IP: %s", cfg.ProxyIP)
+	}
 	if cfg.EnableECH {
 		log.Info("ECH: 已启用 (%s)", cfg.ECHDomain)
 	}
@@ -176,14 +194,11 @@ func printReadyInfo(log *logger.Logger) {
 	log.Info("SOCKS5 代理已就绪: socks5://%s", cfg.ListenAddress)
 }
 
-func waitForSignal(log *logger.Logger) {
+func waitForSignal(log *logger.Logger) os.Signal {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigChan
 	log.Info("收到信号 %v，正在优雅关闭...", sig)
-
-	// 优雅关闭
-	logger.Close()
-	os.Exit(0)
+	return sig
 }

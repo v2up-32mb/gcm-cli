@@ -1,7 +1,7 @@
 # 工作节点地址
 workerHost: "gcm.ics.de5.net"
-# 本地监听端口
-localPort: 30007
+# 本地监听地址
+listenAddress: ":30007"
 # 用户标识
 userID: "v2up"
 # 连接池最小数量
@@ -16,12 +16,12 @@ relayIPs:
   - "mfa.gov.ua"
   - "gcm.cloudflare.182682.xyz"
   - "cf.0sm.com"
-# 代理服务器地址（留空表示不使用）
+# 出口端代理IP（传递给 Worker，留空时 Worker 使用自身已配置的 proxyIP）
 proxyIP: ""
 # 是否启用 DNS over HTTPS
 enableDoH: true
 # DoH 服务地址
-dohUrl: "https://v.recipes/dns-query"
+dohUrl: "https://doh.090227.xyz/CMLiussss"
 # 连接超时时间（毫秒）
 connectionTimeout: 5000
 # DNS 缓存存活时间（毫秒）

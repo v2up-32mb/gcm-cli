@@ -223,6 +223,12 @@ type Config struct {
 	UserID        string   `yaml:"userID,omitempty" json:"userID,omitempty"`
 	LogLevel      LogLevel `yaml:"logLevel" json:"logLevel"`
 
+	// 出口端代理配置
+	ProxyIP string `yaml:"proxyIP,omitempty" json:"proxyIP,omitempty"` // 出口端代理IP，传递给 Worker，留空时 Worker 使用自身已配置的 proxyIP
+
+	// DoH 超时配置
+	DoHTimeout yamlDuration `yaml:"dohTimeout,omitempty" json:"dohTimeout,omitempty"`
+
 	// 连接池配置
 	MinPoolSize       int          `yaml:"minPoolSize" json:"minPoolSize"`
 	MaxPoolSize       int          `yaml:"maxPoolSize" json:"maxPoolSize"`
@@ -420,6 +426,11 @@ func (c *Config) GetQualityRelaySwitchCooldown() time.Duration {
 	return c.QualityRelaySwitchCooldown.Duration
 }
 
+// GetDoHTimeout 返回 DoH 查询超时的 time.Duration 值
+func (c *Config) GetDoHTimeout() time.Duration {
+	return c.DoHTimeout.Duration
+}
+
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
@@ -445,7 +456,7 @@ func DefaultConfig() *Config {
 
 		// DNS 缓存配置
 		EnableDoH:               true,
-		DoHUrl:                  "https://v.recipes/dns-query",
+		DoHUrl:                  "", // 空=使用内置备用DoH列表
 		DNSCacheTTL:             yamlDuration{5 * time.Minute},
 		DNSCacheCleanupInterval: yamlDuration{time.Minute},
 		EnableDNSWarmup:         false,
@@ -457,6 +468,9 @@ func DefaultConfig() *Config {
 		ECHDomain:          "cloudflare-ech.com",
 		ECHCacheTTL:        yamlDuration{24 * time.Hour},
 		ECHRefreshInterval: yamlDuration{12 * time.Hour},
+
+		// DoH 超时配置
+		DoHTimeout: yamlDuration{3 * time.Second},
 
 		// 心跳保活配置
 		HeartbeatInterval: yamlDuration{15 * time.Second},

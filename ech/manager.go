@@ -243,3 +243,16 @@ func (em *EchManager) refreshAllCached() {
 func (em *EchManager) StopAutoRefresh() {
 	close(em.stopChan)
 }
+
+// CacheConfig 手动注入预取的 ECH 配置（用于冷启动阶段避免循环依赖）
+func (em *EchManager) CacheConfig(domain string, echConfig []byte) {
+	if len(echConfig) == 0 {
+		return
+	}
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	em.cache[domain] = &cacheEntry{
+		echConfig: echConfig,
+		expiresAt: time.Now().Add(em.cacheTTL),
+	}
+}

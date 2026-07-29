@@ -343,6 +343,15 @@ func (p *ConnectionPool) Warmup() error {
 	return nil
 }
 
+// buildWSSURL 构建 WebSocket 连接 URL（包含 proxyIP 参数）
+func (p *ConnectionPool) buildWSSURL() string {
+	url := fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+	if p.cfg.ProxyIP != "" {
+		url += "?fallbackip=" + p.cfg.ProxyIP
+	}
+	return url
+}
+
 // generateWSID 生成 WebSocket ID (3字节)
 func (p *ConnectionPool) generateWSID() []byte {
 	buf := make([]byte, 3)
@@ -471,7 +480,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	if relay != nil {
 		// 中转模式：URL 仍用原始 Worker，但通过 NetDial 将 TCP 连接到中转节点
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			// addr 是 workerHost:443，替换为中转节点的 IP:PORT
 			return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
@@ -479,7 +488,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
 	} else {
 		// 直连模式：也需要设置 DialTimeout，否则会无限期等待
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			return net.DialTimeout(network, addr, p.cfg.GetConnectionTimeout())
 		}
@@ -615,7 +624,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	if relay != nil {
 		// 中转模式：URL 仍用原始 Worker，但通过 NetDial 将 TCP 连接到中转节点
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			// addr 是 workerHost:443，替换为中转节点的 IP:PORT
 			return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
@@ -623,7 +632,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
 	} else {
 		// 直连模式：也需要设置 DialTimeout，否则会无限期等待
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			return net.DialTimeout(network, addr, p.cfg.GetConnectionTimeout())
 		}
@@ -673,6 +682,16 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 	case <-time.After(p.cfg.GetConnectionTimeout() * 2): // 外层超时保护（2倍 ConnectionTimeout）
 		atomic.AddInt64(&p.stats.Failures, 1)
 		p.log.Warn("连接失败 (%s): 总体超时 (目标: %s)", reason, url)
+		// 启动清理 goroutine，等待 Dial 完成后关闭可能泄漏的 ws/resp
+		go func() {
+			res := <-resultChan
+			if res.ws != nil {
+				res.ws.Close()
+			}
+			if res.resp != nil {
+				res.resp.Body.Close()
+			}
+		}()
 		return false
 	}
 
@@ -820,6 +839,16 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 	case <-time.After(p.cfg.GetConnectionTimeout() * 2):
 		atomic.AddInt64(&p.stats.Failures, 1)
 		p.log.Warn("连接失败 (%s): 总体超时", reason)
+		// 启动清理 goroutine，等待 Dial 完成后关闭可能泄漏的 ws/resp
+		go func() {
+			res := <-resultChan
+			if res.ws != nil {
+				res.ws.Close()
+			}
+			if res.resp != nil {
+				res.resp.Body.Close()
+			}
+		}()
 		return false
 	}
 
@@ -1445,7 +1474,7 @@ func (p *ConnectionPool) maintainPool() {
 		int(atomic.LoadInt32(&p.pendingConnections))
 
 	if currentSize < int(p.currentMinPoolSize) {
-		p.createConnection("维护补给")
+		go p.createConnection("维护补给")
 		return
 	}
 
@@ -1497,7 +1526,7 @@ func (p *ConnectionPool) maintainPool() {
 
 	if needExpansion {
 		p.log.Info("触发按需扩容: %s", reason)
-		p.createConnection(fmt.Sprintf("按需扩容(%s)", reason))
+		go p.createConnection(fmt.Sprintf("按需扩容(%s)", reason))
 	}
 }
 
@@ -1536,6 +1565,11 @@ func (p *ConnectionPool) cullOldConnections() {
 	for _, item := range p.pool {
 		if removed < beforeSize-keepMin && now.Sub(item.CreatedAt) > p.cfg.GetConnectionTTL() {
 			item.WS.Close()
+			// 同步清理 StreamManager，避免 GetConnectionWithStream 命中已死连接
+			if mgr, ok := p.managerByConn[item]; ok {
+				mgr.HandleConnectionClose()
+				delete(p.managerByConn, item)
+			}
 			atomic.AddInt64(&p.stats.ClosedConnections, 1)
 			removed++
 		} else {
@@ -1790,25 +1824,6 @@ func (p *ConnectionPool) Close() {
 	}
 	p.pool = nil
 	p.managerByConn = nil
-}
-
-
-
-
-// min 返回最小值
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// max 返回最大值
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // GetStream 获取指定的 Stream 对象（用于流控）

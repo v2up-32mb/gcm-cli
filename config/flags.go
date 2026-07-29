@@ -46,6 +46,13 @@ func DefineFlags() []cli.Flag {
 			OnlyOnce: true,
 		},
 		&cli.StringFlag{
+			Name:     "proxy-ip",
+			Aliases:  []string{"p"},
+			Usage:    "出口端代理IP (留空时 Worker 使用自身已配置的 proxyIP)",
+			Category: "基本",
+			OnlyOnce: true,
+		},
+		&cli.StringFlag{
 			Name:     "log-level",
 			Usage:    "日志级别: DEBUG/INFO/WARN/ERROR",
 			Value:    "INFO",
@@ -59,6 +66,13 @@ func DefineFlags() []cli.Flag {
 			Aliases:  []string{"d"},
 			Usage:    "DoH 服务地址",
 			Value:    "https://v.recipes/dns-query",
+			Category: "网络",
+			OnlyOnce: true,
+		},
+		&cli.DurationFlag{
+			Name:     "doh-timeout",
+			Usage:    "DoH 查询超时时间",
+			Value:    3 * time.Second,
 			Category: "网络",
 			OnlyOnce: true,
 		},
@@ -268,6 +282,9 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	if cmd.IsSet("user-id") {
 		cfg.UserID = cmd.String("user-id")
 	}
+	if cmd.IsSet("proxy-ip") {
+		cfg.ProxyIP = cmd.String("proxy-ip")
+	}
 	if cmd.IsSet("log-level") {
 		cfg.LogLevel = ParseLogLevel(cmd.String("log-level"))
 	}
@@ -275,6 +292,9 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 	// ===== DNS 配置 =====
 	if cmd.IsSet("doh") {
 		cfg.DoHUrl = cmd.String("doh")
+	}
+	if cmd.IsSet("doh-timeout") {
+		cfg.DoHTimeout = yamlDuration{cmd.Duration("doh-timeout")}
 	}
 	if cmd.IsSet("no-doh") && cmd.Bool("no-doh") {
 		cfg.EnableDoH = false

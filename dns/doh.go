@@ -37,40 +37,59 @@ type HTTPSRecord struct {
 	raw      []byte // 原始记录数据
 }
 
+// DefaultDoHServers 内置备用 DoH 服务器列表（仅在用户未手动指定时使用）
+// 依次尝试，首个成功即返回；全部失败则回退系统 DNS
+var DefaultDoHServers = []string{
+	"https://v.recipes/dns-query",
+	"https://doh.090227.xyz/CMLiussss",
+	"https://doh.pub/dns-query",
+}
+
 // DoHClient DNS over HTTPS 客户端
 type DoHClient struct {
-	dohURL  string
+	dohURLs []string          // DoH 服务器列表（依次尝试）
 	client  *http.Client
 	enabled bool
 	log     *logger.Logger
 }
 
 // DoHResponse DoH 响应结构
+// DoHResponse DoH JSON API 响应结构
+// Question 字段用 json.RawMessage 兼容不同 DoH 服务器返回格式（有的返回对象有的返回数组）
+// Answer 字段同理兼容 object/array
 type DoHResponse struct {
-	Status   int  `json:"Status"`
-	TC       bool `json:"TC"`
-	RD       bool `json:"RD"`
-	RA       bool `json:"RA"`
-	AD       bool `json:"AD"`
-	CD       bool `json:"CD"`
-	Question []struct {
-		Name string `json:"name"`
-		Type int    `json:"type"`
-	} `json:"Question"`
-	Answer []struct {
-		Name string `json:"name"`
-		Type int    `json:"type"`
-		Data string `json:"data"`
-	} `json:"Answer"`
+	Status   int              `json:"Status"`
+	TC       bool             `json:"TC"`
+	RD       bool             `json:"RD"`
+	RA       bool             `json:"RA"`
+	AD       bool             `json:"AD"`
+	CD       bool             `json:"CD"`
+	Question json.RawMessage  `json:"Question"`
+	Answer   []DoHAnswerEntry `json:"Answer"`
+}
+
+// DoHAnswerEntry DoH Answer 条目
+type DoHAnswerEntry struct {
+	Name string `json:"name"`
+	Type int    `json:"type"`
+	Data string `json:"data"`
 }
 
 // NewDoHClient 创建 DoH 客户端
+// 如果用户手动指定了 DoHUrl，则仅使用该服务器；
+// 否则使用内置备用列表（依次尝试，全部失败回退系统 DNS）
 func NewDoHClient(cfg *config.Config) *DoHClient {
+	var urls []string
+	if cfg.DoHUrl != "" {
+		urls = []string{cfg.DoHUrl}
+	} else {
+		urls = DefaultDoHServers
+	}
 	return &DoHClient{
-		dohURL:  cfg.DoHUrl,
+		dohURLs: urls,
 		enabled: cfg.EnableDoH,
 		client: &http.Client{
-			Timeout: time.Second, // 1秒超时，快速失败
+			Timeout: cfg.GetDoHTimeout(),
 		},
 		log: logger.GetLogger("DoH"),
 	}
@@ -84,26 +103,46 @@ func (d *DoHClient) EnableProxy(proxyTransport http.RoundTripper) {
 }
 
 // Resolve 解析域名（支持 A/AAAA/HTTPS 记录）
+// 依次尝试所有 DoH 服务器，首个成功即返回；全部失败返回最后一个错误
 func (d *DoHClient) Resolve(domain string, queryType string) (string, error) {
 	if !d.enabled {
 		d.log.Debug("DoH 未启用，跳过解析: %s (%s)", domain, queryType)
 		return "", fmt.Errorf("DoH 未启用")
 	}
 
-	// 重试机制：TLS 握手可能因数据交错而失败
-	maxRetries := 3
 	var lastErr error
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
-	defer cancel()
+
+	for i, dohURL := range d.dohURLs {
+		// 每个服务器使用独立超时，避免上一个失败耗尽总时间
+		ctx, cancel := context.WithTimeout(context.Background(), d.client.Timeout)
+		result, err := d.resolveWithServer(ctx, dohURL, domain, queryType)
+		cancel()
+
+		if err == nil {
+			if i > 0 {
+				d.log.Debug("DoH 第%d个服务器成功: %s", i+1, dohURL)
+			}
+			return result, nil
+		}
+
+		lastErr = err
+		d.log.Debug("DoH 服务器[%d]失败: %s -> %v", i+1, dohURL, err)
+	}
+
+	return "", fmt.Errorf("所有 DoH 服务器均失败: %w", lastErr)
+}
+
+// resolveWithServer 通过指定 DoH 服务器解析（带重试）
+func (d *DoHClient) resolveWithServer(ctx context.Context, dohURL string, domain string, queryType string) (string, error) {
+	maxRetries := 2
+	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		// 检查 Context 是否已取消
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
 
 		if attempt > 0 {
-			d.log.Debug("DoH 重试 %d/%d: %s (%s)", attempt, maxRetries-1, domain, queryType)
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
@@ -111,20 +150,20 @@ func (d *DoHClient) Resolve(domain string, queryType string) (string, error) {
 			}
 		}
 
-		result, err := d.resolveAttempt(ctx, domain, queryType)
+		result, err := d.resolveAttempt(ctx, dohURL, domain, queryType)
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
 
-		// 如果是 TLS 错误或连接错误，继续重试
+		// 如果是 TLS 错误或连接错误，短重试一次（可能是数据交错）
 		errStr := err.Error()
 		if strings.Contains(errStr, "TLS") || strings.Contains(errStr, "connection") || strings.Contains(errStr, "EOF") {
 			continue
 		}
 
-		// 其他错误直接返回
+		// 其他错误直接返回，换下一个服务器
 		break
 	}
 
@@ -132,26 +171,24 @@ func (d *DoHClient) Resolve(domain string, queryType string) (string, error) {
 }
 
 // resolveAttempt 单次解析尝试（优先 RFC 8484，失败时回退到 JSON API）
-func (d *DoHClient) resolveAttempt(ctx context.Context, domain string, queryType string) (string, error) {
+func (d *DoHClient) resolveAttempt(ctx context.Context, dohURL string, domain string, queryType string) (string, error) {
 	// 优先尝试 RFC 8484 (Standard DoH)
-	// 这提供了最好的兼容性，支持 Aliyun, DNSPod, Cloudflare, Google 等
-	res, err := d.resolveRFC8484(ctx, domain, queryType)
+	res, err := d.resolveRFC8484(ctx, dohURL, domain, queryType)
 	if err == nil {
 		return res, nil
 	}
 
-	// 如果 RFC 8484 失败，且不是上下文取消导致的，尝试 JSON API (Google/Cloudflare style)
-	// 主要作为回退，或者针对仅支持 JSON 的旧服务
+	// 如果 RFC 8484 失败，且不是上下文取消导致的，尝试 JSON API
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
 
 	// JSON API fallback
-	return d.resolveJSON(ctx, domain, queryType)
+	return d.resolveJSON(ctx, dohURL, domain, queryType)
 }
 
 // resolveRFC8484 使用 RFC 8484 标准 (application/dns-message) 解析
-func (d *DoHClient) resolveRFC8484(ctx context.Context, domain string, queryTypeStr string) (string, error) {
+func (d *DoHClient) resolveRFC8484(ctx context.Context, dohURL string, domain string, queryTypeStr string) (string, error) {
 	// 转换查询类型
 	var qType dnsmessage.Type
 	switch queryTypeStr {
@@ -201,7 +238,7 @@ func (d *DoHClient) resolveRFC8484(ctx context.Context, domain string, queryType
 	}
 
 	// 发送 POST 请求
-	req, err := http.NewRequestWithContext(ctx, "POST", d.dohURL, bytes.NewReader(msgBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", dohURL, bytes.NewReader(msgBytes))
 	if err != nil {
 		return "", fmt.Errorf("create request failed: %w", err)
 	}
@@ -325,11 +362,11 @@ func (d *DoHClient) GetECHConfig(domain string) ([]byte, error) {
 }
 
 // resolveJSON 使用 JSON API 解析 (Google/Cloudflare style)
-func (d *DoHClient) resolveJSON(ctx context.Context, domain string, queryType string) (string, error) {
+func (d *DoHClient) resolveJSON(ctx context.Context, dohURL string, domain string, queryType string) (string, error) {
 	startTime := time.Now()
 
 	// 构建请求 URL
-	reqURL, err := url.Parse(d.dohURL)
+	reqURL, err := url.Parse(dohURL)
 	if err != nil {
 		return "", fmt.Errorf("解析 DoH URL 失败: %w", err)
 	}

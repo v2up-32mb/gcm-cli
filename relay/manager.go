@@ -115,9 +115,9 @@ func (rm *RelayManager) Init() error {
 				Source: raw,
 			})
 		} else {
-			// 域名解析
+			// 域名解析（优先 DoH，回退系统 DNS）
 			rm.log.Debug("正在解析域名: %s ...", host)
-			ips, err := dns.LookupIP(host)
+			ips, err := rm.dnsCache.LookupIPs(host)
 			if err != nil {
 				rm.log.Error("解析中转域名 %s 失败: %v", host, err)
 				continue
@@ -472,7 +472,7 @@ func (rm *RelayManager) ForceRescore() bool {
 				Source: raw,
 			})
 		} else {
-			ips, err := dns.LookupIP(host)
+			ips, err := rm.dnsCache.LookupIPs(host)
 			if err != nil {
 				rm.log.Error("解析域名 %s 失败: %v", host, err)
 				continue

@@ -1,0 +1,17 @@
+name = "gcm-server"
+main = "worker.js"
+compatibility_date = "2025-12-13"
+account_id = "cdcf0f97e5d4512450d210d96d9d5e29"
+workers_dev = true
+
+[vars]
+USER_ID = "v2up"
+FALLBACK_IPS = "proxyip.us.cmliussss.net,tw.william.us.ci"
+
+[[kv_namespaces]]
+binding = "GCM_KV"
+id = "63c8510262044b97bb8a8590adc176b9"
+
+[[routes]]
+pattern = "gcm.ics.de5.net"
+custom_domain = true

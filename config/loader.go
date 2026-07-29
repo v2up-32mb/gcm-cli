@@ -15,20 +15,6 @@ var globalConfig *Config
 
 // LoadConfig 加载配置（主入口）
 func LoadConfig() (*Config, error) {
-	// 先检查是否是 help 参数
-	for _, arg := range os.Args {
-		if arg == "-h" || arg == "--help" {
-			// 显示帮助并退出程序
-			cmd := &cli.Command{
-				Name:  "gcm",
-				Usage: "GCM - Cloudflare Worker Proxy 客户端",
-				Flags: DefineFlags(),
-			}
-			_ = cmd.Run(context.Background(), os.Args)
-			os.Exit(0)
-		}
-	}
-
 	cmd := &cli.Command{
 		Name:  "gcm",
 		Usage: "GCM - Cloudflare Worker Proxy 客户端",
