@@ -70,8 +70,8 @@ func DefineFlags() []cli.Flag {
 			Category: "网络",
 		},
 		&cli.BoolFlag{
-			Name:     "dns-warmup",
-			Usage:    "启用 DNS 预热",
+			Name:     "no-dns-warmup",
+			Usage:    "禁用 DNS 预热",
 			Category: "高级",
 		},
 		&cli.BoolFlag{
@@ -247,8 +247,8 @@ func ApplyFlags(cfg *Config, ctx *cli.Context) error {
 	if ctx.IsSet("no-doh") && ctx.Bool("no-doh") {
 		cfg.EnableDoH = false
 	}
-	if ctx.IsSet("dns-warmup") && ctx.Bool("dns-warmup") {
-		cfg.EnableDNSWarmup = true
+	if ctx.IsSet("no-dns-warmup") && ctx.Bool("no-dns-warmup") {
+		cfg.EnableDNSWarmup = false
 	}
 	if ctx.IsSet("doh-proxy") && ctx.Bool("doh-proxy") {
 		cfg.EnableDoHProxy = true

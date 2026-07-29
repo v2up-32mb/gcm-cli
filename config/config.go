@@ -443,7 +443,7 @@ func DefaultConfig() *Config {
 		DoHUrl:                  "", // 空=使用内置备用DoH列表
 		DNSCacheTTL:             yamlDuration{5 * time.Minute},
 		DNSCacheCleanupInterval: yamlDuration{time.Minute},
-		EnableDNSWarmup:         false,
+		EnableDNSWarmup:         true,
 		DNSWarmupDomains:        []string{},
 		EnableDoHProxy:          false,
 
