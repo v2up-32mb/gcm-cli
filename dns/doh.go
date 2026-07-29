@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gcm/config"
@@ -47,10 +48,11 @@ var DefaultDoHServers = []string{
 
 // DoHClient DNS over HTTPS 客户端
 type DoHClient struct {
-	dohURLs []string // DoH 服务器列表（依次尝试）
-	client  *http.Client
-	enabled bool
-	log     *logger.Logger
+	dohURLs       []string // DoH 服务器列表（依次尝试）
+	client        *http.Client
+	enabled       bool
+	log           *logger.Logger
+	lastServerIdx int32 // 上次成功的 DoH 服务器索引（原子操作，从该索引开始尝试）
 }
 
 // DoHResponse DoH 响应结构
@@ -103,24 +105,31 @@ func (d *DoHClient) EnableProxy(proxyTransport http.RoundTripper) {
 }
 
 // Resolve 解析域名（支持 A/AAAA/HTTPS 记录）
-// 依次尝试所有 DoH 服务器，首个成功即返回；全部失败返回最后一个错误
+// 从上次成功的 DoH 服务器索引开始尝试，依次轮转直到找到可用的服务器
 func (d *DoHClient) Resolve(domain string, queryType string) (string, error) {
 	if !d.enabled {
 		d.log.Debug("DoH 未启用，跳过解析: %s (%s)", domain, queryType)
 		return "", fmt.Errorf("DoH 未启用")
 	}
 
+	n := len(d.dohURLs)
+	startIdx := int(atomic.LoadInt32(&d.lastServerIdx)) % n
 	var lastErr error
 
-	for i, dohURL := range d.dohURLs {
+	for offset := 0; offset < n; offset++ {
+		i := (startIdx + offset) % n
+		dohURL := d.dohURLs[i]
+
 		// 每个服务器使用独立超时，避免上一个失败耗尽总时间
 		ctx, cancel := context.WithTimeout(context.Background(), d.client.Timeout)
 		result, err := d.resolveWithServer(ctx, dohURL, domain, queryType)
 		cancel()
 
 		if err == nil {
-			if i > 0 {
-				d.log.Debug("DoH 第%d个服务器成功: %s", i+1, dohURL)
+			// 更新上次成功的服务器索引，下次直接从该服务器开始
+			if i != startIdx {
+				atomic.StoreInt32(&d.lastServerIdx, int32(i))
+				d.log.Debug("DoH 服务器指针移动到[%d]: %s", i+1, dohURL)
 			}
 			return result, nil
 		}
