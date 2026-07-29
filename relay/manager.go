@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"fmt"
 	"math/rand"
 	"net"
 	"strconv"
@@ -352,7 +351,7 @@ func (rm *RelayManager) GetBestRelayExcluding(excludeAddr string) *RelayNode {
 
 	// 遍历优选节点列表，找到第一个不是 excludeAddr 的节点
 	for _, node := range rm.optimalRelays {
-		addr := fmt.Sprintf("%s:%d", node.IP, node.Port)
+		addr := net.JoinHostPort(node.IP, strconv.Itoa(node.Port))
 		if addr != excludeAddr {
 			return node
 		}
@@ -362,11 +361,10 @@ func (rm *RelayManager) GetBestRelayExcluding(excludeAddr string) *RelayNode {
 	return nil
 }
 
-
 // testLatency 单个节点测速
 func (rm *RelayManager) testLatency(node *RelayNode) *RelayNode {
 	start := time.Now()
-	address := fmt.Sprintf("%s:%d", node.IP, node.Port)
+	address := net.JoinHostPort(node.IP, strconv.Itoa(node.Port))
 
 	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
@@ -724,7 +722,6 @@ type RelayStats struct {
 	BestLatency  time.Duration
 	WorstLatency time.Duration
 }
-
 
 // min 返回最小值
 func min(a, b int) int {
