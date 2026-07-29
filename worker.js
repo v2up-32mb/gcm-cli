@@ -164,6 +164,19 @@ class StreamManager {
       return false;
     }
 
+    // 预注册 stream（乐观模式）：TCP 尚未连上时缓存客户端早期数据
+    // 客户端在发 CONNECT 后会乐观发送 SOCKS5 成功并开始转发数据
+    // 这些数据可能在 CONNECTED 之前到达，需要缓存等 TCP 连上后 flush
+    this.streams.set(streamId, {
+      remoteSocket: null,
+      remoteWriter: null,
+      remoteReader: null,
+      isClosed: false,
+      tcpConnected: false,
+      pendingBuffer: [],
+    });
+    this.streamCount++;
+
     let { host, port } = parseAddress(targetAddr);
     const attempts = this.config.enableFallback
       ? [null, ...this.config.cfFallbackIPs]
@@ -195,15 +208,36 @@ class StreamManager {
         const remoteWriter = remoteSocket.writable.getWriter();
         const remoteReader = remoteSocket.readable.getReader();
 
-        this.streams.set(streamId, {
-          remoteSocket,
-          remoteWriter,
-          remoteReader,
-          isClosed: false,
-        });
-        this.streamCount++;
+        // 更新已预注册的 stream：绑定真实的 socket 并 flush 缓存数据
+        const stream = this.streams.get(streamId);
+        if (!stream || stream.isClosed) {
+          // 在 TCP 连接过程中流已被关闭
+          try { remoteWriter.releaseLock(); } catch {}
+          try { remoteSocket.close(); } catch {}
+          return false;
+        }
+        stream.remoteSocket = remoteSocket;
+        stream.remoteWriter = remoteWriter;
+        stream.remoteReader = remoteReader;
+        stream.tcpConnected = true;
 
         this.log(`[${streamId}] ${attemptDesc}成功`);
+
+        // Flush 缓存的早期数据到远程 socket
+        if (stream.pendingBuffer.length > 0) {
+          this.log(`[${streamId}] flush ${stream.pendingBuffer.length} 条缓存数据`);
+          for (const pending of stream.pendingBuffer) {
+            try {
+              await remoteWriter.write(pending);
+            } catch (e) {
+              this.log(`[${streamId}] flush 写入失败: ${e.message}`);
+              this.closeStream(streamId);
+              return false;
+            }
+          }
+          stream.pendingBuffer = [];
+        }
+
         this.sendConnected(streamId);
 
         // 启动数据转发
@@ -214,11 +248,13 @@ class StreamManager {
         this.log(`[${streamId}] ${attemptDesc}失败: ${err.message}`);
 
         if (!isCFError(err) || i === attempts.length - 1) {
-          this.sendError(streamId, err.message);
+          this.closeStream(streamId);
           return false;
         }
       }
     }
+    // 所有尝试都失败，清理预注册的 stream
+    this.closeStream(streamId);
     return false;
   }
 
@@ -236,6 +272,13 @@ class StreamManager {
     const stream = this.getStream(streamId);
     if (!stream || stream.isClosed) {
       return false;
+    }
+
+    // TCP 尚未连上时缓存数据，等连接成功后 flush
+    if (!stream.tcpConnected) {
+      const bufData = data instanceof Uint8Array ? data : encoder.encode(data);
+      stream.pendingBuffer.push(bufData);
+      return true;
     }
 
     try {
@@ -260,6 +303,9 @@ class StreamManager {
     if (!stream || stream.isClosed) return;
 
     stream.isClosed = true;
+
+    // 清理缓存
+    stream.pendingBuffer = [];
 
     try {
       stream.remoteWriter?.releaseLock();

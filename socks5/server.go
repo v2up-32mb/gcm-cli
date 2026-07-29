@@ -282,11 +282,21 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 		return
 	}
 
-	// 创建完成信号通道
-	done := make(chan struct{})
+	// 乐观响应：发送 CONNECT 后立即回复 SOCKS5 成功，不等 CONNECTED 返回
+	// 这样浏览器可以提前开始 TLS 握手，省一个 RTT 的等待
+	socks5Reply := []byte{socks5Version, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+	if _, err := clientConn.Write(socks5Reply); err != nil {
+		s.log.Debug("乐观发送 SOCKS5 响应失败: %v", err)
+		connItem.RecordFailure()
+		s.pool.UnregisterStreamHandler(connItem, streamID)
+		s.pool.ReleaseConnection(connItem)
+		return
+	}
+
 	// 创建关闭信号通道
 	closed := make(chan struct{})
 
+	// connected 记录 CONNECTED 是否已到达（不再阻塞数据转发）
 	connected := false
 	var bytesSent, bytesReceived int64
 
@@ -348,26 +358,17 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 					}
 					s.log.Info("连接建立 -> %s:%d | WS[%s] Stream[%s] 延迟=%dms",
 						originalHost, port, connIDStr, streamIDStr, connectLatency.Milliseconds())
-					// 发送 SOCKS5 连接成功响应
-					if _, err := clientConn.Write([]byte{socks5Version, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
-						s.log.Debug("发送 SOCKS5 响应失败: %v", err)
-						cleanup()
-						return
-					}
-					// 通知主 goroutine 连接成功
-					select {
-					case <-done:
-						// 已经关闭
-					default:
-						close(done)
-					}
+					// SOCKS5 响应已在发 CONNECT 后乐观发送，此处无需再发
 				} else if msg.Type == protocol.MsgTypeClose {
-					// 连接建立前收到 CLOSE
+					// CONNECTED 之前收到 CLOSE：乐观响应已发送，无法收回
+					// 直接 close clientConn 让浏览器收到 RST 重连
 					connItem.RecordFailure()
 					stream := s.pool.GetStream(connItem, streamID)
 					if stream != nil {
 						stream.RecordTimeout()
 					}
+					s.log.Warn("连接建立前失败: %s:%d | WS[%s] Stream[%s]",
+						originalHost, port, connIDStr, streamIDStr)
 					cleanup()
 				}
 			} else {
@@ -418,37 +419,37 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 				return
 			}
 
-			if connected {
-				// 窗口流控：等待发送窗口有足够空间
-				stream := s.pool.GetStream(connItem, streamID)
-				if stream != nil {
-					if err := stream.WaitForSendWindow(n); err != nil {
-						s.log.Debug("发送窗口等待超时: %v", err)
-						cleanup()
-						return
-					}
-				}
-
-				bytesSent += int64(n)
-				// 更新连接流量统计（发送）
-				connItem.Traffic.AddSent(int64(n))
-				dataMsg := protocol.NewDataMessage(streamID, buf[:n])
-				if err := connItem.WriteMessage(websocket.BinaryMessage, dataMsg.Encode()); err != nil {
+			// 乐观响应已发送，始终转发数据（不等 CONNECTED）
+			// 窗口流控：等待发送窗口有足够空间
+			stream := s.pool.GetStream(connItem, streamID)
+			if stream != nil {
+				if err := stream.WaitForSendWindow(n); err != nil {
+					s.log.Debug("发送窗口等待超时: %v", err)
 					cleanup()
 					return
 				}
 			}
-			// 未连接时静默丢弃数据
+
+			bytesSent += int64(n)
+			// 更新连接流量统计（发送）
+			connItem.Traffic.AddSent(int64(n))
+			dataMsg := protocol.NewDataMessage(streamID, buf[:n])
+			if err := connItem.WriteMessage(websocket.BinaryMessage, dataMsg.Encode()); err != nil {
+				cleanup()
+				return
+			}
 		}
 	}()
 
-	// 等待连接成功或超时
+	// 乐观响应已发送，等待连接关闭或超时
 	select {
-	case <-done:
-		// 连接成功，等待连接关闭
-		s.log.Debug("隧道建立成功: %s:%d", originalHost, port)
-		// 等待连接真正关闭
-		<-closed
+	case <-closed:
+		// 连接已关闭（正常或异常）
+		if !connected {
+			// CONNECTED 从未到达
+			s.log.Debug("连接未建立即关闭: %s:%d | WS[%s] Stream[%s]",
+				originalHost, port, connIDStr, streamIDStr)
+		}
 	case <-ctx.Done():
 		// 上下文超时或取消
 		if !connected {
@@ -459,20 +460,8 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 			if stream != nil {
 				stream.RecordTimeout()
 			}
-			cleanup()
 		}
-	case <-closed:
-		// 连接在建立前就关闭了
-		if !connected {
-			s.log.Debug("连接在建立前关闭: %s:%d | WS[%s] Stream[%s]",
-				originalHost, port, connIDStr, streamIDStr)
-			connItem.RecordFailure()
-			stream := s.pool.GetStream(connItem, streamID)
-			if stream != nil {
-				stream.RecordTimeout()
-			}
-			cleanup()
-		}
+		cleanup()
 	}
 }
 
