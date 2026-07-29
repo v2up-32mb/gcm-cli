@@ -950,8 +950,12 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 			connIDStr, item.RelayAddr,
 			formatBytes(sent), formatBytes(recv), streams)
 
+		// 在锁内收集需要清理的 manager，在锁外调用 HandleConnectionClose。
+		// 原因：HandleConnectionClose 会触发 OnClose 回调，回调中的 cleanup()
+		// 会调用 UnregisterStreamHandler/ReleaseConnection，它们都需要 p.mu.Lock()。
+		// 如果在持有 p.mu 时调用，就会死锁。
+		var mgrToClose *StreamManager
 		p.mu.Lock()
-		// 从空闲池中移除
 		for i, ci := range p.pool {
 			if ci == item {
 				p.pool = append(p.pool[:i], p.pool[i+1:]...)
@@ -959,13 +963,17 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 				break
 			}
 		}
-		// 通知 StreamManager 清理所有 stream
 		if mgr, ok := p.managerByConn[item]; ok {
-			mgr.HandleConnectionClose()
+			mgrToClose = mgr
 			delete(p.managerByConn, item)
 		}
 		delete(p.pendingHeartbeats, connIDStr)
 		p.mu.Unlock()
+
+		// 锁外通知 StreamManager 清理所有 stream（触发 OnClose 回调）
+		if mgrToClose != nil {
+			mgrToClose.HandleConnectionClose()
+		}
 
 		// 静默关闭 WebSocket（忽略 "already closed" 错误）
 		ws.Close() // nolint:errcheck
@@ -1809,18 +1817,42 @@ func (p *ConnectionPool) GetStats() *PoolStats {
 func (p *ConnectionPool) Close() {
 	close(p.stopChan)
 
+	// 在锁内收集所有需要关闭的连接和 manager，然后在锁外执行关闭操作。
+	// 原因：HandleConnectionClose 会触发 OnClose 回调，回调中的 cleanup() 会
+	// 调用 UnregisterStreamHandler/ReleaseConnection，它们都需要获取 p.mu.Lock()。
+	// 如果在持有 p.mu 时调用，就会死锁。
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	poolItems := p.pool
+	managerItems := make(map[*ConnItem]*StreamManager, len(p.managerByConn))
+	for item, mgr := range p.managerByConn {
+		// 复制 manager 引用，但排除已在 pool 中的 item（避免重复关闭）
+		if _, inPool := containsConn(poolItems, item); !inPool {
+			managerItems[item] = mgr
+		}
+	}
+	// 清空 pool 和 managerByConn，防止 messageLoop defer 重复操作
+	p.pool = nil
+	p.managerByConn = nil
+	p.mu.Unlock()
 
-	for _, item := range p.pool {
+	// 锁外关闭连接（WS.Close 会触发 messageLoop 退出，不影响锁）
+	for _, item := range poolItems {
 		item.WS.Close()
 	}
-	for item, mgr := range p.managerByConn {
+	for item, mgr := range managerItems {
 		mgr.HandleConnectionClose()
 		item.WS.Close()
 	}
-	p.pool = nil
-	p.managerByConn = nil
+}
+
+// containsConn 检查连接是否在列表中，返回索引和是否存在
+func containsConn(list []*ConnItem, target *ConnItem) (int, bool) {
+	for i, item := range list {
+		if item == target {
+			return i, true
+		}
+	}
+	return -1, false
 }
 
 // GetStream 获取指定的 Stream 对象（用于流控）
