@@ -184,20 +184,20 @@ func DefineFlags() []cli.Flag {
 		// ===== 窗口流控配置 =====
 		&cli.StringFlag{
 			Name:     "default-window-size",
-			Usage:    "默认窗口大小 (如 256KB, 1MB)",
-			Value:    "256KB",
+			Usage:    "默认窗口大小 (如 1MB, 2MB)",
+			Value:    "1MB",
 			Category: "高级",
 		},
 		&cli.StringFlag{
 			Name:     "min-window-size",
-			Usage:    "最小窗口大小 (如 32KB)",
-			Value:    "32KB",
+			Usage:    "最小窗口大小 (如 64KB)",
+			Value:    "64KB",
 			Category: "高级",
 		},
 		&cli.StringFlag{
 			Name:     "max-window-size",
-			Usage:    "最大窗口大小 (如 1MB)",
-			Value:    "1MB",
+			Usage:    "最大窗口大小 (如 4MB)",
+			Value:    "4MB",
 			Category: "高级",
 		},
 		&cli.DurationFlag{

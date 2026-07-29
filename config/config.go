@@ -487,9 +487,9 @@ func DefaultConfig() *Config {
 		MaxStreamsPerConnection: 5,
 
 		// 窗口流控配置
-		DefaultWindowSize: yamlByteSize{256 * 1024},      // 256KB
-		MinWindowSize:     yamlByteSize{32 * 1024},       // 32KB
-		MaxWindowSize:     yamlByteSize{1024 * 1024},     // 1MB
+		DefaultWindowSize: yamlByteSize{1024 * 1024},     // 1MB
+		MinWindowSize:     yamlByteSize{64 * 1024},       // 64KB
+		MaxWindowSize:     yamlByteSize{4 * 1024 * 1024}, // 4MB
 		WindowTimeout:     yamlDuration{5 * time.Second}, // 5秒
 
 		// 拥塞控制配置
