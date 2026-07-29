@@ -12,9 +12,9 @@ import (
 
 // 窗口流控常量
 const (
-	DefaultWindowSize = 256 * 1024 // 默认窗口大小 256KB
-	MinWindowSize     = 32 * 1024  // 最小窗口大小 32KB
-	MaxWindowSize     = 1024 * 1024 // 最大窗口大小 1MB
+	DefaultWindowSize = 256 * 1024      // 默认窗口大小 256KB
+	MinWindowSize     = 32 * 1024       // 最小窗口大小 32KB
+	MaxWindowSize     = 1024 * 1024     // 最大窗口大小 1MB
 	WindowTimeout     = 5 * time.Second // 窗口等待超时
 )
 
@@ -22,11 +22,11 @@ const (
 type StreamState int
 
 const (
-	StreamStateIdle StreamState = iota
-	StreamStateSynSent      // 已发送 CONNECT
-	StreamStateEstablished  // 已收到 CONNECTED
-	StreamStateFinWait      // 已发送/收到 CLOSE
-	StreamStateClosed       // 完全关闭
+	StreamStateIdle        StreamState = iota
+	StreamStateSynSent                 // 已发送 CONNECT
+	StreamStateEstablished             // 已收到 CONNECTED
+	StreamStateFinWait                 // 已发送/收到 CLOSE
+	StreamStateClosed                  // 完全关闭
 )
 
 // Stream 表示单个流的状态
@@ -40,18 +40,18 @@ type Stream struct {
 	LastActiveAt time.Time
 
 	// 窗口流控 (借鉴 yamux 设计)
-	sendWindow    int64      // 可发送字节数（原子操作）
-	recvWindow    int64      // 可接收字节数（原子操作）
-	windowSize    int64      // 窗口大小（默认 256KB）
-	sendBlocked   chan struct{} // 发送阻塞通知
-	windowMu      sync.Mutex    // 保护窗口操作
+	sendWindow  int64         // 可发送字节数（原子操作）
+	recvWindow  int64         // 可接收字节数（原子操作）
+	windowSize  int64         // 窗口大小（默认 256KB）
+	sendBlocked chan struct{} // 发送阻塞通知
+	windowMu    sync.Mutex    // 保护窗口操作
 
 	// 拥塞控制 (借鉴 smux 设计)
-	rttHistory    [10]time.Duration // RTT 历史记录（环形缓冲区）
-	rttIndex      int               // RTT 历史索引
-	baselineRTT   time.Duration     // 基线 RTT（最小值）
-	timeoutCount  int64             // 超时次数（原子操作）
-	successCount  int64             // 成功次数（原子操作）
+	rttHistory   [10]time.Duration // RTT 历史记录（环形缓冲区）
+	rttIndex     int               // RTT 历史索引
+	baselineRTT  time.Duration     // 基线 RTT（最小值）
+	timeoutCount int64             // 超时次数（原子操作）
+	successCount int64             // 成功次数（原子操作）
 
 	// 状态机与优先级
 	state    StreamState // 当前状态

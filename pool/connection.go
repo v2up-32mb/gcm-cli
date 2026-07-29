@@ -32,7 +32,7 @@ type ConnItem struct {
 	ConnectionID []byte // 3 bytes WS ID
 	RelayAddr    string // 中转节点地址
 	CreatedAt    time.Time
-	RTT          atomic.Int64 // 存储纳秒值
+	RTT          atomic.Int64        // 存储纳秒值
 	Streams      int                 // 当前活跃流数
 	Traffic      *TrafficCounter     // 流量计数器
 	mu           sync.Mutex          // 保护 Streams 和 targets
@@ -40,17 +40,17 @@ type ConnItem struct {
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
 
 	// 质量监控字段
-	QualityScore      int64              // 质量评分 (0-100)，原子操作
-	BaselineRTT       time.Duration      // 基线 RTT（创建时的 RTT）
-	RTTHistory        [10]time.Duration  // RTT 历史（环形缓冲区）
-	RTTIndex          int                // RTT 历史索引
-	HeartbeatFailures int64              // 心跳失败次数（原子操作）
-	RequestFailures   int64              // 请求失败次数（原子操作）
-	RequestSuccesses  int64              // 请求成功次数（原子操作）
-	LastQualityCheck  time.Time          // 上次质量检查时间
-	IsDegraded        bool               // 是否已劣化
-	DegradedSince     time.Time          // 劣化开始时间
-	qualityMu         sync.Mutex         // 保护质量监控字段
+	QualityScore      int64             // 质量评分 (0-100)，原子操作
+	BaselineRTT       time.Duration     // 基线 RTT（创建时的 RTT）
+	RTTHistory        [10]time.Duration // RTT 历史（环形缓冲区）
+	RTTIndex          int               // RTT 历史索引
+	HeartbeatFailures int64             // 心跳失败次数（原子操作）
+	RequestFailures   int64             // 请求失败次数（原子操作）
+	RequestSuccesses  int64             // 请求成功次数（原子操作）
+	LastQualityCheck  time.Time         // 上次质量检查时间
+	IsDegraded        bool              // 是否已劣化
+	DegradedSince     time.Time         // 劣化开始时间
+	qualityMu         sync.Mutex        // 保护质量监控字段
 }
 
 // WriteMessage 线程安全的 WebSocket 写入方法
@@ -396,8 +396,8 @@ func (p *ConnectionPool) handleDialError(err error, relay *relay.RelayNode) {
 	// 1. 判断是否为 ECH 相关错误
 	if p.cfg.EnableECH && p.echManager != nil {
 		if strings.Contains(errStr, "ech") ||
-		   strings.Contains(errStr, "encrypted_client_hello") ||
-		   strings.Contains(errStr, "tls: handshake failure") {
+			strings.Contains(errStr, "encrypted_client_hello") ||
+			strings.Contains(errStr, "tls: handshake failure") {
 
 			// 增加 ECH 失败计数
 			failCount := atomic.AddInt32(&p.echFailureCount, 1)
@@ -1709,7 +1709,6 @@ func (p *ConnectionPool) sendHeartbeat() {
 	}
 }
 
-
 // rateUpdateLoop 定期更新所有连接的速率统计
 func (p *ConnectionPool) rateUpdateLoop() {
 	ticker := time.NewTicker(1 * time.Second)
@@ -1783,8 +1782,6 @@ func (p *ConnectionPool) adjustPoolSize() {
 		}
 	}
 }
-
-
 
 // UpdateAllRates 更新所有连接的速率统计
 // 直接访问 managerByConn，避免调用 GetAllActiveConnections() 造成额外开销
@@ -1889,4 +1886,3 @@ func (p *ConnectionPool) adjustAllStreamsWindow() {
 		p.log.Debug("拥塞控制: 调整了 %d 个 Stream 的窗口大小", adjustedCount)
 	}
 }
-

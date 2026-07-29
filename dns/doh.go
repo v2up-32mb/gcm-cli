@@ -47,7 +47,7 @@ var DefaultDoHServers = []string{
 
 // DoHClient DNS over HTTPS 客户端
 type DoHClient struct {
-	dohURLs []string          // DoH 服务器列表（依次尝试）
+	dohURLs []string // DoH 服务器列表（依次尝试）
 	client  *http.Client
 	enabled bool
 	log     *logger.Logger

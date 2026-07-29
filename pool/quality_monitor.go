@@ -16,14 +16,14 @@ import (
 
 // ConnectionQualityMonitor 连接质量监控器
 type ConnectionQualityMonitor struct {
-	pool              *ConnectionPool
-	checkInterval     time.Duration // 检查间隔（默认 10 秒）
-	degradeThreshold  int64         // 劣化阈值（分数 < 60）
-	switchCooldown    time.Duration // 切换冷却期（默认 5 分钟）
-	lastSwitchTime    time.Time     // 上次切换时间
-	mu                sync.Mutex
-	log               *logger.Logger
-	stopChan          chan struct{}
+	pool             *ConnectionPool
+	checkInterval    time.Duration // 检查间隔（默认 10 秒）
+	degradeThreshold int64         // 劣化阈值（分数 < 60）
+	switchCooldown   time.Duration // 切换冷却期（默认 5 分钟）
+	lastSwitchTime   time.Time     // 上次切换时间
+	mu               sync.Mutex
+	log              *logger.Logger
+	stopChan         chan struct{}
 }
 
 // NewConnectionQualityMonitor 创建连接质量监控器
@@ -254,6 +254,3 @@ func (m *ConnectionQualityMonitor) resortIdlePool() {
 		return scoreI > scoreJ // 降序：高分在前
 	})
 }
-
-
-

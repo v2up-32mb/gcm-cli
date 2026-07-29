@@ -435,9 +435,9 @@ func (c *Config) GetDoHTimeout() time.Duration {
 func DefaultConfig() *Config {
 	return &Config{
 		// 基本配置
-		WorkerHost:    "", // 必须通过 --worker 参数或配置文件指定
-		ListenAddress: ":1080",            // 标准 SOCKS5 端口
-		UserID:        "",                 // 无鉴权时留空
+		WorkerHost:    "",      // 必须通过 --worker 参数或配置文件指定
+		ListenAddress: ":1080", // 标准 SOCKS5 端口
+		UserID:        "",      // 无鉴权时留空
 		LogLevel:      INFO,
 
 		// 连接池配置
@@ -518,10 +518,10 @@ func DefaultConfig() *Config {
 		CongestionControlInterval: yamlDuration{time.Minute}, // 60秒
 
 		// 连接质量监控配置
-		EnableQualityMonitor:       true,                          // 默认启用
+		EnableQualityMonitor:       true,                           // 默认启用
 		QualityCheckInterval:       yamlDuration{10 * time.Second}, // 10秒检查一次
-		QualityDegradeThreshold:    60,                            // 分数 < 60 视为劣化
-		QualityRelaySwitchCooldown: yamlDuration{5 * time.Minute}, // 5分钟冷却期
-		QualityMinDegradedCount:    2,                             // 至少2个劣化连接才触发切换
+		QualityDegradeThreshold:    60,                             // 分数 < 60 视为劣化
+		QualityRelaySwitchCooldown: yamlDuration{5 * time.Minute},  // 5分钟冷却期
+		QualityMinDegradedCount:    2,                              // 至少2个劣化连接才触发切换
 	}
 }
