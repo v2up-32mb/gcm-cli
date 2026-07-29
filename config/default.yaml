@@ -3,9 +3,9 @@
 # 使用方法: gcm-go -c config.yaml
 
 # ===== 基本配置 =====
-workerHost: ""                 # Worker 地址（必须指定）
-listenAddress: ":10080"         # SOCKS5 监听地址（如 ":10080" 或 "0.0.0.0:10080"）
-proxyToken: ""                  # 代理访问令牌（可选）
+workerHost: ""                  # Worker 地址（必须指定）
+listenAddress: ":1080"          # SOCKS5 监听地址
+userID: ""                      # 代理访问令牌（可选）
 logLevel: "INFO"                # 日志级别: DEBUG/INFO/WARN/ERROR
 
 # ===== 连接池配置 =====
@@ -28,9 +28,7 @@ dynamicPoolLowThreshold: 0.3    # 低负载阈值（活跃率 < 30%）
 dynamicPoolHighThreshold: 0.8   # 高负载阈值（利用率 > 80%）
 
 # ===== 中转节点配置 =====
-relayIPs:                       # 中转节点列表
-  - "36.140.124.162:10009"
-  - "v6.gh-proxy.org"
+relayIPs: []                     # 中转节点列表（留空则直连 Worker）
 relayMonitorInterval: "30s"     # 节点延迟监控间隔
 relayMaxLatency: "500ms"        # 节点最大可接受延迟
 relayFailureThreshold: 3        # 节点连续失败次数阈值
@@ -58,8 +56,6 @@ heartbeatTimeout: "3s"          # 心跳响应超时
 enableTcpNoDelay: true          # 启用 TCP_NODELAY
 
 # ===== Metrics 配置 =====
-enableMetrics: false            # 是否启用 metrics 端点
-metricsPort: 9090               # metrics HTTP 端口
 
 # ===== 断线重连配置 =====
 enableAutoReconnect: true       # 是否启用断线自动重连
@@ -76,8 +72,17 @@ logFileMaxSize: 10485760        # 日志文件最大大小（字节，10MB）
 logFileBackupCount: 3           # 保留的日志备份数量
 
 # ===== 统计增强配置 =====
-enableStats: true               # 是否启用统计增强
 
 # ===== 多路复用配置 =====
 enableMultiplex: true           # 是否启用多路复用（需 Worker 端配合）
 maxStreamsPerConnection: 5      # 每个连接最大并发流数
+
+# ===== 窗口流控配置 =====
+defaultWindowSize: "256KB"      # 默认窗口大小
+minWindowSize: "32KB"           # 最小窗口大小（拥塞时的下限）
+maxWindowSize: "1MB"            # 最大窗口大小（扩展时的上限）
+windowTimeout: "5s"             # 窗口等待超时时间
+
+# ===== 拥塞控制配置 =====
+congestionControlInterval: "1m" # 拥塞控制检查间隔
+

@@ -37,12 +37,12 @@ type tunnelConn struct {
 // newTunnelConn 创建隧道连接
 func newTunnelConn(connItem *ConnItem, streamID byte, target string) *tunnelConn {
 	return &tunnelConn{
-		connItem:  connItem,
-		streamID:  streamID,
-		target:    target,
-		readChan:  make(chan []byte, 100), // 缓冲区
-		closeChan: make(chan struct{}),
-		localAddr: &tunnelAddr{net: "tcp", addr: "127.0.0.1:0"},
+		connItem:   connItem,
+		streamID:   streamID,
+		target:     target,
+		readChan:   make(chan []byte, 100), // 缓冲区
+		closeChan:  make(chan struct{}),
+		localAddr:  &tunnelAddr{net: "tcp", addr: "127.0.0.1:0"},
 		remoteAddr: &tunnelAddr{net: "tcp", addr: target},
 	}
 }
@@ -87,7 +87,7 @@ func (c *tunnelConn) Write(b []byte) (n int, err error) {
 	}
 	c.mu.Unlock()
 
-	dataMsg := protocol.NewDataMessage(c.connItem.ConnectionID, c.streamID, b)
+	dataMsg := protocol.NewDataMessage(c.streamID, b)
 	if err := c.connItem.WriteMessage(websocket.BinaryMessage, dataMsg.Encode()); err != nil {
 		return 0, fmt.Errorf("tunnelConn write error: %w", err)
 	}
@@ -104,8 +104,10 @@ func (c *tunnelConn) Close() error {
 	}
 	c.closed = true
 
-	closeMsg := protocol.NewCloseMessage(c.connItem.ConnectionID, c.streamID)
-	c.connItem.WriteMessage(websocket.BinaryMessage, closeMsg.Encode())
+	closeMsg := protocol.NewCloseMessage(c.streamID)
+	if err := c.connItem.WriteMessage(websocket.BinaryMessage, closeMsg.Encode()); err != nil {
+		// 记录但继续关闭（连接即将关闭，无法恢复）
+	}
 
 	close(c.closeChan)
 	return nil
@@ -182,13 +184,11 @@ func (t *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("获取连接失败: %w", err)
 	}
 
-	wsID := connItem.ConnectionID
-
 	// 3. 先注册 handler（在发送 CONNECT 之前），避免竞态条件
 	connectedChan := make(chan struct{}, 1)
 	dataChan := make(chan []byte, 100) // DATA 消息缓冲
 	closeChan := make(chan struct{}, 1)
-	streamRegistered := true            // 标记 Stream 是否需要清理
+	streamRegistered := true // 标记 Stream 是否需要清理
 
 	handler := &StreamHandler{
 		OnMessage: func(msg *protocol.Message) {
@@ -226,7 +226,7 @@ func (t *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.pool.RegisterStreamHandler(connItem, streamID, handler, targetAddr)
 
 	// 4. 发送 CONNECT 消息
-	connectMsg := protocol.NewConnectMessage(wsID, streamID, host, port)
+	connectMsg := protocol.NewConnectMessage(streamID, host, port)
 	if err := connItem.WriteMessage(websocket.BinaryMessage, connectMsg.Encode()); err != nil {
 		t.pool.UnregisterStreamHandler(connItem, streamID)
 		return nil, fmt.Errorf("发送 CONNECT 失败: %w", err)

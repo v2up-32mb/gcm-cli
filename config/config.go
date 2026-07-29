@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -117,6 +118,103 @@ func (yd *yamlDuration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+// yamlByteSize 是字节大小的包装器，支持 YAML 中的字符串格式（如 "256KB", "1MB"）
+type yamlByteSize struct {
+	Bytes int64
+}
+
+// MarshalYAML 实现 yaml.Marshaler 接口
+func (yb yamlByteSize) MarshalYAML() (interface{}, error) {
+	return formatBytes(yb.Bytes), nil
+}
+
+// UnmarshalYAML 实现 yaml.Unmarshaler 接口
+func (yb *yamlByteSize) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var v interface{}
+	if err := unmarshal(&v); err != nil {
+		return err
+	}
+
+	switch value := v.(type) {
+	case float64:
+		// JSON 数字格式（字节）
+		yb.Bytes = int64(value)
+	case int:
+		// JSON 整数格式（字节）
+		yb.Bytes = int64(value)
+	case string:
+		// YAML 字符串格式（如 "256KB", "1MB"）
+		bytes, err := parseByteSize(value)
+		if err != nil {
+			return fmt.Errorf("无法解析字节大小: %q: %w", value, err)
+		}
+		yb.Bytes = bytes
+	default:
+		return fmt.Errorf("无效的字节大小类型: %T", v)
+	}
+
+	return nil
+}
+
+// parseByteSize 解析字节大小字符串（如 "256KB", "1MB"）
+func parseByteSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+
+	// 提取数字和单位
+	var num float64
+	var unit string
+	_, err := fmt.Sscanf(s, "%f%s", &num, &unit)
+	if err != nil {
+		// 尝试只解析数字（默认为字节）
+		_, err2 := fmt.Sscanf(s, "%f", &num)
+		if err2 != nil {
+			return 0, fmt.Errorf("无效的字节大小格式: %s", s)
+		}
+		return int64(num), nil
+	}
+
+	// 转换单位
+	var multiplier int64
+	switch unit {
+	case "B", "":
+		multiplier = 1
+	case "KB", "K":
+		multiplier = 1024
+	case "MB", "M":
+		multiplier = 1024 * 1024
+	case "GB", "G":
+		multiplier = 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("未知的字节单位: %s", unit)
+	}
+
+	// 检查整数溢出
+	result := num * float64(multiplier)
+	if result > float64(math.MaxInt64) {
+		return 0, fmt.Errorf("字节大小超出范围: %s (最大支持 %d 字节)", s, math.MaxInt64)
+	}
+
+	return int64(result), nil
+}
+
+// formatBytes 格式化字节大小为可读字符串
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	// 防止数组越界（最大支持到 E = Exabyte）
+	if exp >= len("KMGTPE") {
+		exp = len("KMGTPE") - 1
+	}
+	return fmt.Sprintf("%.0f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // Config 应用配置
 type Config struct {
 	// 基本配置
@@ -124,6 +222,12 @@ type Config struct {
 	ListenAddress string   `yaml:"listenAddress" json:"listenAddress"` // 监听地址，如 ":10080" 或 "0.0.0.0:10080"
 	UserID        string   `yaml:"userID,omitempty" json:"userID,omitempty"`
 	LogLevel      LogLevel `yaml:"logLevel" json:"logLevel"`
+
+	// 出口端代理配置
+	ProxyIP string `yaml:"proxyIP,omitempty" json:"proxyIP,omitempty"` // 出口端代理IP，传递给 Worker，留空时 Worker 使用自身已配置的 proxyIP
+
+	// DoH 超时配置
+	DoHTimeout yamlDuration `yaml:"dohTimeout,omitempty" json:"dohTimeout,omitempty"`
 
 	// 连接池配置
 	MinPoolSize       int          `yaml:"minPoolSize" json:"minPoolSize"`
@@ -153,10 +257,6 @@ type Config struct {
 	HeartbeatTimeout  yamlDuration `yaml:"heartbeatTimeout" json:"heartbeatTimeout"`
 	EnableTcpNoDelay  bool         `yaml:"enableTcpNoDelay" json:"enableTcpNoDelay"`
 
-	// Metrics 配置
-	EnableMetrics bool `yaml:"enableMetrics" json:"enableMetrics"`
-	MetricsPort   int  `yaml:"metricsPort" json:"metricsPort"`
-
 	// 连接池预热配置
 	EnablePoolWarmup  bool         `yaml:"enablePoolWarmup" json:"enablePoolWarmup"`
 	WarmupConcurrency int          `yaml:"warmupConcurrency" json:"warmupConcurrency"`
@@ -184,12 +284,25 @@ type Config struct {
 	LogFileMaxSize     int64  `yaml:"logFileMaxSize" json:"logFileMaxSize"`
 	LogFileBackupCount int    `yaml:"logFileBackupCount" json:"logFileBackupCount"`
 
-	// 统计增强配置
-	EnableStats bool `yaml:"enableStats" json:"enableStats"`
-
 	// 多路复用配置
 	EnableMultiplex         bool `yaml:"enableMultiplex" json:"enableMultiplex"`
 	MaxStreamsPerConnection int  `yaml:"maxStreamsPerConnection" json:"maxStreamsPerConnection"`
+
+	// 窗口流控配置
+	DefaultWindowSize yamlByteSize `yaml:"defaultWindowSize" json:"defaultWindowSize"` // 默认窗口大小
+	MinWindowSize     yamlByteSize `yaml:"minWindowSize" json:"minWindowSize"`         // 最小窗口大小
+	MaxWindowSize     yamlByteSize `yaml:"maxWindowSize" json:"maxWindowSize"`         // 最大窗口大小
+	WindowTimeout     yamlDuration `yaml:"windowTimeout" json:"windowTimeout"`         // 窗口等待超时
+
+	// 拥塞控制配置
+	CongestionControlInterval yamlDuration `yaml:"congestionControlInterval" json:"congestionControlInterval"` // 拥塞控制检查间隔
+
+	// 连接质量监控配置
+	EnableQualityMonitor       bool         `yaml:"enableQualityMonitor" json:"enableQualityMonitor"`             // 是否启用质量监控
+	QualityCheckInterval       yamlDuration `yaml:"qualityCheckInterval" json:"qualityCheckInterval"`             // 质量检查间隔
+	QualityDegradeThreshold    int64        `yaml:"qualityDegradeThreshold" json:"qualityDegradeThreshold"`       // 劣化阈值（分数 < 60）
+	QualityRelaySwitchCooldown yamlDuration `yaml:"qualityRelaySwitchCooldown" json:"qualityRelaySwitchCooldown"` // 节点切换冷却期
+	QualityMinDegradedCount    int          `yaml:"qualityMinDegradedCount" json:"qualityMinDegradedCount"`       // 触发切换的最小劣化连接数
 }
 
 // GetConnectionTTL 返回连接 TTL 的 time.Duration 值
@@ -262,13 +375,53 @@ func (c *Config) GetDynamicPoolInterval() time.Duration {
 	return c.DynamicPoolInterval.Duration
 }
 
+// GetDefaultWindowSize 返回默认窗口大小的字节数
+func (c *Config) GetDefaultWindowSize() int64 {
+	return c.DefaultWindowSize.Bytes
+}
+
+// GetMinWindowSize 返回最小窗口大小的字节数
+func (c *Config) GetMinWindowSize() int64 {
+	return c.MinWindowSize.Bytes
+}
+
+// GetMaxWindowSize 返回最大窗口大小的字节数
+func (c *Config) GetMaxWindowSize() int64 {
+	return c.MaxWindowSize.Bytes
+}
+
+// GetWindowTimeout 返回窗口超时的 time.Duration 值
+func (c *Config) GetWindowTimeout() time.Duration {
+	return c.WindowTimeout.Duration
+}
+
+// GetCongestionControlInterval 返回拥塞控制间隔的 time.Duration 值
+func (c *Config) GetCongestionControlInterval() time.Duration {
+	return c.CongestionControlInterval.Duration
+}
+
+// GetQualityCheckInterval 返回质量检查间隔的 time.Duration 值
+func (c *Config) GetQualityCheckInterval() time.Duration {
+	return c.QualityCheckInterval.Duration
+}
+
+// GetQualityRelaySwitchCooldown 返回节点切换冷却期的 time.Duration 值
+func (c *Config) GetQualityRelaySwitchCooldown() time.Duration {
+	return c.QualityRelaySwitchCooldown.Duration
+}
+
+// GetDoHTimeout 返回 DoH 查询超时的 time.Duration 值
+func (c *Config) GetDoHTimeout() time.Duration {
+	return c.DoHTimeout.Duration
+}
+
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
 		// 基本配置
-		WorkerHost:    "", // 必须通过参数或配置文件指定
-		ListenAddress: ":10080",
-		UserID:        "",
+		WorkerHost:    "",      // 必须通过 --worker 参数或配置文件指定
+		ListenAddress: ":1080", // 标准 SOCKS5 端口
+		UserID:        "",      // 无鉴权时留空
 		LogLevel:      INFO,
 
 		// 连接池配置
@@ -278,7 +431,7 @@ func DefaultConfig() *Config {
 		ConnectionTimeout: yamlDuration{time.Second},
 
 		// 中转节点配置
-		RelayIPs:                  []string{"36.140.124.162:10009", "v6.gh-proxy.org"},
+		RelayIPs:                  nil, // 默认不走中转，直连 Worker
 		RelayMonitorInterval:      yamlDuration{30 * time.Second},
 		RelayMaxLatency:           yamlDuration{500 * time.Millisecond},
 		RelayFailureThreshold:     3,
@@ -287,21 +440,20 @@ func DefaultConfig() *Config {
 
 		// DNS 缓存配置
 		EnableDoH:               true,
-		DoHUrl:                  "https://v.recipes/dns-query",
+		DoHUrl:                  "", // 空=使用内置备用DoH列表
 		DNSCacheTTL:             yamlDuration{5 * time.Minute},
 		DNSCacheCleanupInterval: yamlDuration{time.Minute},
 		EnableDNSWarmup:         false,
 		DNSWarmupDomains:        []string{},
 		EnableDoHProxy:          false,
 
+		// DoH 超时配置
+		DoHTimeout: yamlDuration{3 * time.Second},
+
 		// 心跳保活配置
 		HeartbeatInterval: yamlDuration{15 * time.Second},
 		HeartbeatTimeout:  yamlDuration{3 * time.Second},
 		EnableTcpNoDelay:  true,
-
-		// Metrics 配置
-		EnableMetrics: false,
-		MetricsPort:   9090,
 
 		// 连接池预热配置
 		EnablePoolWarmup:  true,
@@ -330,11 +482,24 @@ func DefaultConfig() *Config {
 		LogFileMaxSize:     10 * 1024 * 1024,
 		LogFileBackupCount: 3,
 
-		// 统计增强配置
-		EnableStats: true,
-
 		// 多路复用配置
 		EnableMultiplex:         true,
 		MaxStreamsPerConnection: 5,
+
+		// 窗口流控配置
+		DefaultWindowSize: yamlByteSize{256 * 1024},      // 256KB
+		MinWindowSize:     yamlByteSize{32 * 1024},       // 32KB
+		MaxWindowSize:     yamlByteSize{1024 * 1024},     // 1MB
+		WindowTimeout:     yamlDuration{5 * time.Second}, // 5秒
+
+		// 拥塞控制配置
+		CongestionControlInterval: yamlDuration{time.Minute}, // 60秒
+
+		// 连接质量监控配置
+		EnableQualityMonitor:       true,                           // 默认启用
+		QualityCheckInterval:       yamlDuration{10 * time.Second}, // 10秒检查一次
+		QualityDegradeThreshold:    60,                             // 分数 < 60 视为劣化
+		QualityRelaySwitchCooldown: yamlDuration{5 * time.Minute},  // 5分钟冷却期
+		QualityMinDegradedCount:    2,                              // 至少2个劣化连接才触发切换
 	}
 }

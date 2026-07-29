@@ -2,6 +2,7 @@ package dns
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,42 +14,68 @@ import (
 
 	"github.com/gcm/gcm/config"
 	"github.com/gcm/gcm/logger"
+	"golang.org/x/net/dns/dnsmessage"
 )
+
+// DNS 记录类型常量
+const (
+	RecordTypeA    = 1
+	RecordTypeAAAA = 28
+)
+
+// DefaultDoHServers 内置备用 DoH 服务器列表（仅在用户未手动指定时使用）
+// 依次尝试，首个成功即返回；全部失败则回退系统 DNS
+var DefaultDoHServers = []string{
+	"https://v.recipes/dns-query",
+	"https://doh.090227.xyz/CMLiussss",
+	"https://doh.pub/dns-query",
+}
 
 // DoHClient DNS over HTTPS 客户端
 type DoHClient struct {
-	dohURL  string
+	dohURLs []string // DoH 服务器列表（依次尝试）
 	client  *http.Client
 	enabled bool
 	log     *logger.Logger
 }
 
 // DoHResponse DoH 响应结构
+// DoHResponse DoH JSON API 响应结构
+// Question 字段用 json.RawMessage 兼容不同 DoH 服务器返回格式（有的返回对象有的返回数组）
+// Answer 字段同理兼容 object/array
 type DoHResponse struct {
-	Status   int  `json:"Status"`
-	TC       bool `json:"TC"`
-	RD       bool `json:"RD"`
-	RA       bool `json:"RA"`
-	AD       bool `json:"AD"`
-	CD       bool `json:"CD"`
-	Question []struct {
-		Name string `json:"name"`
-		Type int    `json:"type"`
-	} `json:"Question"`
-	Answer []struct {
-		Name string `json:"name"`
-		Type int    `json:"type"`
-		Data string `json:"data"`
-	} `json:"Answer"`
+	Status   int              `json:"Status"`
+	TC       bool             `json:"TC"`
+	RD       bool             `json:"RD"`
+	RA       bool             `json:"RA"`
+	AD       bool             `json:"AD"`
+	CD       bool             `json:"CD"`
+	Question json.RawMessage  `json:"Question"`
+	Answer   []DoHAnswerEntry `json:"Answer"`
+}
+
+// DoHAnswerEntry DoH Answer 条目
+type DoHAnswerEntry struct {
+	Name string `json:"name"`
+	Type int    `json:"type"`
+	Data string `json:"data"`
 }
 
 // NewDoHClient 创建 DoH 客户端
+// 如果用户手动指定了 DoHUrl，则仅使用该服务器；
+// 否则使用内置备用列表（依次尝试，全部失败回退系统 DNS）
 func NewDoHClient(cfg *config.Config) *DoHClient {
+	var urls []string
+	if cfg.DoHUrl != "" {
+		urls = []string{cfg.DoHUrl}
+	} else {
+		urls = DefaultDoHServers
+	}
 	return &DoHClient{
-		dohURL:  cfg.DoHUrl,
+		dohURLs: urls,
 		enabled: cfg.EnableDoH,
 		client: &http.Client{
-			Timeout: time.Second, // 1秒超时，快速失败
+			Timeout: cfg.GetDoHTimeout(),
 		},
 		log: logger.GetLogger("DoH"),
 	}
@@ -61,54 +88,239 @@ func (d *DoHClient) EnableProxy(proxyTransport http.RoundTripper) {
 	d.log.Info("DoH 客户端已启用代理模式")
 }
 
-// Resolve 解析域名（A 记录或 AAAA 记录）
+// Resolve 解析域名（支持 A/AAAA 记录）
+// 依次尝试所有 DoH 服务器，首个成功即返回；全部失败返回最后一个错误
 func (d *DoHClient) Resolve(domain string, queryType string) (string, error) {
 	if !d.enabled {
 		d.log.Debug("DoH 未启用，跳过解析: %s (%s)", domain, queryType)
 		return "", fmt.Errorf("DoH 未启用")
 	}
 
-	// 重试机制：TLS 握手可能因数据交错而失败
-	maxRetries := 3
+	var lastErr error
+
+	for i, dohURL := range d.dohURLs {
+		// 每个服务器使用独立超时，避免上一个失败耗尽总时间
+		ctx, cancel := context.WithTimeout(context.Background(), d.client.Timeout)
+		result, err := d.resolveWithServer(ctx, dohURL, domain, queryType)
+		cancel()
+
+		if err == nil {
+			if i > 0 {
+				d.log.Debug("DoH 第%d个服务器成功: %s", i+1, dohURL)
+			}
+			return result, nil
+		}
+
+		lastErr = err
+		d.log.Debug("DoH 服务器[%d]失败: %s -> %v", i+1, dohURL, err)
+	}
+
+	return "", fmt.Errorf("所有 DoH 服务器均失败: %w", lastErr)
+}
+
+// resolveWithServer 通过指定 DoH 服务器解析（带重试）
+func (d *DoHClient) resolveWithServer(ctx context.Context, dohURL string, domain string, queryType string) (string, error) {
+	maxRetries := 2
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			d.log.Debug("DoH 重试 %d/%d: %s (%s)", attempt, maxRetries-1, domain, queryType)
-			time.Sleep(time.Duration(attempt*100) * time.Millisecond)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
 
-		result, err := d.resolveAttempt(domain, queryType)
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(attempt*100) * time.Millisecond):
+			}
+		}
+
+		result, err := d.resolveAttempt(ctx, dohURL, domain, queryType)
 		if err == nil {
 			return result, nil
 		}
 
 		lastErr = err
 
-		// 如果是 TLS 错误或连接错误，继续重试
-		if strings.Contains(err.Error(), "TLS") || strings.Contains(err.Error(), "connection") || strings.Contains(err.Error(), "EOF") {
+		// 如果是 TLS 错误或连接错误，短重试一次（可能是数据交错）
+		errStr := err.Error()
+		if strings.Contains(errStr, "TLS") || strings.Contains(errStr, "connection") || strings.Contains(errStr, "EOF") {
 			continue
 		}
 
-		// 其他错误直接返回
+		// 其他错误直接返回，换下一个服务器
 		break
 	}
 
 	return "", lastErr
 }
 
-// resolveAttempt 单次解析尝试
-func (d *DoHClient) resolveAttempt(domain string, queryType string) (string, error) {
+// resolveAttempt 单次解析尝试（优先 RFC 8484，失败时回退到 JSON API）
+func (d *DoHClient) resolveAttempt(ctx context.Context, dohURL string, domain string, queryType string) (string, error) {
+	// 优先尝试 RFC 8484 (Standard DoH)
+	res, err := d.resolveRFC8484(ctx, dohURL, domain, queryType)
+	if err == nil {
+		return res, nil
+	}
+
+	// 如果 RFC 8484 失败，且不是上下文取消导致的，尝试 JSON API
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
+	// JSON API fallback
+	return d.resolveJSON(ctx, dohURL, domain, queryType)
+}
+
+// resolveRFC8484 使用 RFC 8484 标准 (application/dns-message) 解析
+func (d *DoHClient) resolveRFC8484(ctx context.Context, dohURL string, domain string, queryTypeStr string) (string, error) {
+	// 转换查询类型
+	var qType dnsmessage.Type
+	switch queryTypeStr {
+	case "A":
+		qType = dnsmessage.TypeA
+	case "AAAA":
+		qType = dnsmessage.TypeAAAA
+	default:
+		qType = dnsmessage.TypeA
+	}
+
+	// 构造 DNS 查询消息
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+		ID:                 0,
+		Response:           false,
+		OpCode:             0,
+		Authoritative:      false,
+		Truncated:          false,
+		RecursionDesired:   true,
+		RecursionAvailable: false,
+		RCode:              dnsmessage.RCodeSuccess,
+	})
+	b.EnableCompression()
+
+	if err := b.StartQuestions(); err != nil {
+		return "", err
+	}
+
+	// 构造域名（防止非法域名导致 panic）
+	name, err := dnsmessage.NewName(domain + ".")
+	if err != nil {
+		return "", fmt.Errorf("invalid domain name: %w", err)
+	}
+
+	if err := b.Question(dnsmessage.Question{
+		Name:  name,
+		Type:  qType,
+		Class: dnsmessage.ClassINET,
+	}); err != nil {
+		return "", err
+	}
+	msgBytes, err := b.Finish()
+	if err != nil {
+		return "", err
+	}
+
+	// 发送 POST 请求
+	req, err := http.NewRequestWithContext(ctx, "POST", dohURL, bytes.NewReader(msgBytes))
+	if err != nil {
+		return "", fmt.Errorf("create request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+
+	startTime := time.Now()
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("DoH RFC8484 request failed: Status=%d, Body=%s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	// 解析响应
+	var parser dnsmessage.Parser
+	if _, err := parser.Start(body); err != nil {
+		return "", fmt.Errorf("parse dns response header failed: %w", err)
+	}
+
+	// Skip questions
+	if err := parser.SkipAllQuestions(); err != nil {
+		return "", err
+	}
+
+	// Parse answers
+	for {
+		h, err := parser.AnswerHeader()
+		if err == dnsmessage.ErrSectionDone {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("parse answer failed: %w", err)
+		}
+
+		// 检查类型是否匹配
+		if h.Type == qType {
+			switch h.Type {
+			case dnsmessage.TypeA:
+				r, err := parser.AResource() // AResource() 已消费当前 Answer
+				if err != nil {
+					return "", err
+				}
+				elapsed := time.Since(startTime)
+				result := net.IP(r.A[:]).String()
+				d.log.Debug("解析成功 (RFC8484): %s -> %s (%s), 耗时%dms", domain, result, queryTypeStr, elapsed.Milliseconds())
+				return result, nil // 直接返回，无需 SkipAnswer
+			case dnsmessage.TypeAAAA:
+				r, err := parser.AAAAResource() // AAAAResource() 已消费当前 Answer
+				if err != nil {
+					return "", err
+				}
+				elapsed := time.Since(startTime)
+				result := net.IP(r.AAAA[:]).String()
+				d.log.Debug("解析成功 (RFC8484): %s -> %s (%s), 耗时%dms", domain, result, queryTypeStr, elapsed.Milliseconds())
+				return result, nil // 直接返回，无需 SkipAnswer
+			}
+		}
+
+		// 类型不匹配，跳过当前 Answer 继续查找
+		if err := parser.SkipAnswer(); err != nil {
+			return "", err
+		}
+	}
+
+	return "", fmt.Errorf("no answer found")
+}
+
+// ResolveA 解析 A 记录 (IPv4)
+func (d *DoHClient) ResolveA(domain string) (string, error) {
+	return d.Resolve(domain, "A")
+}
+
+// ResolveAAAA 解析 AAAA 记录 (IPv6)
+func (d *DoHClient) ResolveAAAA(domain string) (string, error) {
+	return d.Resolve(domain, "AAAA")
+}
+
+// resolveJSON 使用 JSON API 解析 (Google/Cloudflare style)
+func (d *DoHClient) resolveJSON(ctx context.Context, dohURL string, domain string, queryType string) (string, error) {
 	startTime := time.Now()
 
 	// 构建请求 URL
-	reqURL, err := url.Parse(d.dohURL)
+	reqURL, err := url.Parse(dohURL)
 	if err != nil {
 		return "", fmt.Errorf("解析 DoH URL 失败: %w", err)
 	}
 
 	// Google DoH 特殊处理：将 /dns-query 替换为 /resolve（JSON API）
-	// Google 的 /dns-query 是 RFC8484 格式，/resolve 才是 JSON 格式
 	if strings.Contains(reqURL.Host, "dns.google") || strings.Contains(reqURL.Host, "google.com") {
 		if reqURL.Path == "/dns-query" || reqURL.Path == "" {
 			reqURL.Path = "/resolve"
@@ -122,10 +334,10 @@ func (d *DoHClient) resolveAttempt(domain string, queryType string) (string, err
 	q.Set("type", queryType)
 	reqURL.RawQuery = q.Encode()
 
-	d.log.Debug("正在解析: %s (%s) via %s", domain, queryType, reqURL.String())
+	d.log.Debug("正在解析 (JSON): %s (%s) via %s", domain, queryType, reqURL.String())
 
 	// 创建请求
-	req, err := http.NewRequest("GET", reqURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -148,6 +360,10 @@ func (d *DoHClient) resolveAttempt(domain string, queryType string) (string, err
 		return "", err
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("DoH JSON 请求失败: Status=%d, Body=%s", resp.StatusCode, string(body))
+	}
+
 	// 解析 JSON
 	var dohResp DoHResponse
 	if err := json.Unmarshal(body, &dohResp); err != nil {
@@ -159,15 +375,20 @@ func (d *DoHClient) resolveAttempt(domain string, queryType string) (string, err
 	elapsed := time.Since(startTime)
 
 	// 查找答案
-	recordType := 1 // A 记录
-	if queryType == "AAAA" {
-		recordType = 28 // AAAA 记录
+	var recordType int
+	switch queryType {
+	case "A":
+		recordType = RecordTypeA
+	case "AAAA":
+		recordType = RecordTypeAAAA
+	default:
+		recordType = RecordTypeA
 	}
 
 	if len(dohResp.Answer) > 0 {
 		for _, ans := range dohResp.Answer {
 			if ans.Type == recordType {
-				d.log.Debug("解析成功: %s -> %s (%s), 耗时%dms", domain, ans.Data, queryType, elapsed.Milliseconds())
+				d.log.Debug("解析成功 (JSON): %s -> %s (%s), 耗时%dms", domain, ans.Data, queryType, elapsed.Milliseconds())
 				return ans.Data, nil
 			}
 		}
@@ -175,16 +396,6 @@ func (d *DoHClient) resolveAttempt(domain string, queryType string) (string, err
 
 	d.log.Debug("解析无结果: %s (%s), 耗时%dms", domain, queryType, elapsed.Milliseconds())
 	return "", fmt.Errorf("无解析结果")
-}
-
-// ResolveA 解析 A 记录 (IPv4)
-func (d *DoHClient) ResolveA(domain string) (string, error) {
-	return d.Resolve(domain, "A")
-}
-
-// ResolveAAAA 解析 AAAA 记录 (IPv6)
-func (d *DoHClient) ResolveAAAA(domain string) (string, error) {
-	return d.Resolve(domain, "AAAA")
 }
 
 // IsIPv6 检查是否为 IPv6 地址

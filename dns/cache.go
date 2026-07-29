@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,7 +12,7 @@ import (
 
 // CacheEntry 缓存条目
 type CacheEntry struct {
-	IP        string
+	IP        string // A/AAAA 记录的 IP
 	ExpiresAt time.Time
 }
 
@@ -61,8 +62,8 @@ func (dc *DNSCache) getKey(domain string, queryType string) string {
 
 // Get 获取缓存的 IP
 func (dc *DNSCache) Get(domain string, queryType string) (string, bool) {
-	dc.mu.RLock()
-	defer dc.mu.RUnlock()
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
 
 	key := dc.getKey(domain, queryType)
 	entry, exists := dc.cache[key]
@@ -70,7 +71,7 @@ func (dc *DNSCache) Get(domain string, queryType string) (string, bool) {
 		return "", false
 	}
 
-	// 检查是否过期
+	// 检查是否过期并删除
 	if time.Now().After(entry.ExpiresAt) {
 		delete(dc.cache, key)
 		dc.log.Debug("缓存过期: %s (%s)", domain, queryType)
@@ -271,4 +272,37 @@ type CacheStatsInfo struct {
 	Hits    int64
 	Misses  int64
 	HitRate float64
+}
+
+// LookupIPs 解析域名获取所有 IP 地址（优先 DoH，回退系统 DNS）
+// 返回 A 和 AAAA 记录的合并 IP 列表
+func (dc *DNSCache) LookupIPs(domain string) ([]string, error) {
+	var ips []string
+
+	// 优先尝试 DoH A 记录
+	if dc.dohClient != nil && dc.dohClient.enabled {
+		if ip, err := dc.ResolveA(domain); err == nil && ip != "" {
+			ips = append(ips, ip)
+		}
+		// 尝试 AAAA 记录
+		if ip, err := dc.ResolveAAAA(domain); err == nil && ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+
+	// 如果 DoH 没有结果，回退到系统 DNS
+	if len(ips) == 0 {
+		dc.log.Debug("DoH 无结果，回退系统 DNS: %s", domain)
+		sysIPs, err := LookupIP(domain)
+		if err != nil {
+			return nil, err
+		}
+		ips = sysIPs
+	}
+
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("域名 %s 解析结果为空", domain)
+	}
+
+	return ips, nil
 }

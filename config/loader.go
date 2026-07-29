@@ -55,7 +55,7 @@ func LoadConfig() (*Config, error) {
 
 			// 4. 验证配置
 			if cfg.WorkerHost == "" {
-				return fmt.Errorf("worker 地址必须指定（通过 --worker 参数或配置文件）")
+				return fmt.Errorf("必须指定 Worker 地址（通过 --worker/-w 参数或配置文件设置）")
 			}
 
 			// 5. 设置全局配置

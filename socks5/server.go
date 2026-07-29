@@ -3,10 +3,13 @@ package socks5
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gcm/gcm/config"
@@ -66,6 +69,13 @@ func (s *Server) acceptLoop() {
 	for {
 		conn, err := s.server.Accept()
 		if err != nil {
+			// 检查是否为可恢复的系统错误
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR) {
+				s.log.Warn("接受连接临时错误: %v, 1秒后重试", err)
+				time.Sleep(time.Second)
+				continue
+			}
+			// 永久错误（如 listener 关闭），退出循环
 			s.log.Error("接受连接失败: %v", err)
 			return
 		}
@@ -100,67 +110,90 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 // handleAuth 处理认证
 func (s *Server) handleAuth(conn net.Conn) error {
-	buf := make([]byte, 256)
+	// 设置读取超时
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
 
-	// 读取认证请求
-	n, err := conn.Read(buf)
-	if err != nil || n < 3 {
-		return fmt.Errorf("读取认证请求失败")
+	// 读取前 2 字节: [版本, 方法数量]
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return fmt.Errorf("读取认证头失败: %w", err)
 	}
 
-	if buf[0] != socks5Version {
-		return fmt.Errorf("不支持的 SOCKS 版本: %d", buf[0])
+	if header[0] != socks5Version {
+		return fmt.Errorf("不支持的 SOCKS 版本: %d", header[0])
+	}
+
+	// 读取方法列表
+	nMethods := int(header[1])
+	if nMethods > 0 {
+		methods := make([]byte, nMethods)
+		if _, err := io.ReadFull(conn, methods); err != nil {
+			return fmt.Errorf("读取认证方法失败: %w", err)
+		}
 	}
 
 	// 响应：无需认证
-	_, err = conn.Write([]byte{socks5Version, authNone})
+	_, err := conn.Write([]byte{socks5Version, authNone})
 	return err
 }
 
 // handleRequest 处理请求
 // 返回: 原始主机名(用于日志), 解析后的主机(用于连接), 端口, 错误
 func (s *Server) handleRequest(conn net.Conn) (originalHost, resolvedHost string, port uint16, err error) {
-	buf := make([]byte, 256)
+	// 设置读取超时
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
 
-	n, err := conn.Read(buf)
-	if err != nil || n < 4 {
-		return "", "", 0, fmt.Errorf("读取请求失败")
+	// 读取固定头部: [版本, 命令, 保留, 地址类型] = 4 字节
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return "", "", 0, fmt.Errorf("读取请求头失败: %w", err)
 	}
 
 	// 检查版本和命令
-	if buf[0] != socks5Version {
-		return "", "", 0, fmt.Errorf("不支持的 SOCKS 版本: %d", buf[0])
+	if header[0] != socks5Version {
+		return "", "", 0, fmt.Errorf("不支持的 SOCKS 版本: %d", header[0])
 	}
 
-	if buf[1] != cmdConnect {
-		// 发送不支持的命令响应
-		conn.Write([]byte{socks5Version, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		return "", "", 0, fmt.Errorf("不支持的命令: %d", buf[1])
+	if header[1] != cmdConnect {
+		_, err := conn.Write([]byte{socks5Version, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		if err != nil {
+			return "", "", 0, fmt.Errorf("发送错误响应失败: %w", err)
+		}
+		return "", "", 0, fmt.Errorf("不支持的命令: %d", header[1])
 	}
 
 	// 解析目标地址
-	addrType := buf[3]
+	addrType := header[3]
 
 	switch addrType {
 	case atypIPv4:
-		if n < 10 {
-			return "", "", 0, fmt.Errorf("IPv4 地址长度不足")
+		// IPv4: 4 字节 IP + 2 字节端口
+		addrBuf := make([]byte, 6)
+		if _, err := io.ReadFull(conn, addrBuf); err != nil {
+			return "", "", 0, fmt.Errorf("读取 IPv4 地址失败: %w", err)
 		}
-		originalHost = fmt.Sprintf("%d.%d.%d.%d", buf[4], buf[5], buf[6], buf[7])
+		originalHost = fmt.Sprintf("%d.%d.%d.%d", addrBuf[0], addrBuf[1], addrBuf[2], addrBuf[3])
 		resolvedHost = originalHost
-		port = binary.BigEndian.Uint16(buf[8:10])
+		port = binary.BigEndian.Uint16(addrBuf[4:6])
 		s.log.Debug("IPv4 请求: %s:%d", originalHost, port)
 
 	case atypDomain:
-		if n < 5 {
-			return "", "", 0, fmt.Errorf("域名长度不足")
+		// 先读取域名长度 (1 字节)
+		lenBuf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
+			return "", "", 0, fmt.Errorf("读取域名长度失败: %w", err)
 		}
-		domainLen := int(buf[4])
-		if n < 5+domainLen+2 {
-			return "", "", 0, fmt.Errorf("域名数据不完整")
+		domainLen := int(lenBuf[0])
+
+		// 读取域名 + 端口
+		domainBuf := make([]byte, domainLen+2)
+		if _, err := io.ReadFull(conn, domainBuf); err != nil {
+			return "", "", 0, fmt.Errorf("读取域名数据失败: %w", err)
 		}
-		domain := string(buf[5 : 5+domainLen])
-		port = binary.BigEndian.Uint16(buf[5+domainLen : 7+domainLen])
+		domain := string(domainBuf[:domainLen])
+		port = binary.BigEndian.Uint16(domainBuf[domainLen:])
 		originalHost = domain
 		resolvedHost = domain
 
@@ -175,17 +208,21 @@ func (s *Server) handleRequest(conn net.Conn) (originalHost, resolvedHost string
 		}
 
 	case atypIPv6:
-		if n < 22 {
-			return "", "", 0, fmt.Errorf("IPv6 地址长度不足")
+		// IPv6: 16 字节 IP + 2 字节端口
+		addrBuf := make([]byte, 18)
+		if _, err := io.ReadFull(conn, addrBuf); err != nil {
+			return "", "", 0, fmt.Errorf("读取 IPv6 地址失败: %w", err)
 		}
-		ipv6Buf := buf[4:20]
-		originalHost = net.IP(ipv6Buf).String()
+		originalHost = net.IP(addrBuf[:16]).String()
 		resolvedHost = originalHost
-		port = binary.BigEndian.Uint16(buf[20:22])
+		port = binary.BigEndian.Uint16(addrBuf[16:18])
 		s.log.Debug("IPv6 请求: %s:%d", originalHost, port)
 
 	default:
-		conn.Write([]byte{socks5Version, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		_, err := conn.Write([]byte{socks5Version, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		if err != nil {
+			return "", "", 0, fmt.Errorf("发送错误响应失败: %w", err)
+		}
 		return "", "", 0, fmt.Errorf("不支持的地址类型: %d", addrType)
 	}
 
@@ -209,24 +246,18 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	// 构造目标地址字符串（用于亲和性路由，使用解析后的地址）
 	targetAddr := fmt.Sprintf("%s:%d", resolvedHost, port)
 
-	// 记录请求开始
-	var requestStartTime int64
-	if s.cfg.EnableStats {
-		requestStartTime = s.pool.RecordRequestStart()
-	}
+	// 记录请求开始时间（用于延迟统计）
+	requestStartTime := time.Now()
 
 	// 原子化地获取连接并分配流 ID
 	connItem, streamID, err := s.pool.GetConnectionWithStream(ctx, targetAddr)
 	if err != nil {
-		s.log.Warn("获取连接+流失败: %v", err)
-		if s.cfg.EnableStats {
-			s.pool.RecordRequestFailure()
-		}
+		s.log.Warn("获取连接失败: %v", err)
 		return
 	}
 
 	wsID := connItem.ConnectionID
-	connIDStr := fmt.Sprintf("%06x", wsID[0]<<16|wsID[1]<<8|wsID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", wsID[0], wsID[1], wsID[2])
 	streamIDStr := protocol.StreamIDToString(streamID)
 
 	// 日志使用原始主机名
@@ -236,17 +267,14 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	defer atomic.AddInt32(&s.activeTunnels, -1)
 
 	// 发送 CONNECT 消息（使用解析后的地址）
-	connectMsg := protocol.NewConnectMessage(wsID, streamID, resolvedHost, port)
+	connectMsg := protocol.NewConnectMessage(streamID, resolvedHost, port)
 	if err := connItem.WriteMessage(websocket.BinaryMessage, connectMsg.Encode()); err != nil {
 		s.log.Error("发送 CONNECT 消息失败: %v", err)
+		connItem.RecordFailure()
 		s.pool.UnregisterStreamHandler(connItem, streamID)
 		s.pool.ReleaseConnection(connItem)
 		return
 	}
-
-	// 设置超时定时器
-	timeoutTimer := time.NewTimer(s.cfg.GetTunnelTimeout())
-	defer timeoutTimer.Stop()
 
 	// 创建完成信号通道
 	done := make(chan struct{})
@@ -261,20 +289,24 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			// 主动发送 CLOSE 消息到 Worker，通知 Stream 关闭
-			closeMsg := protocol.NewCloseMessage(wsID, streamID)
+			closeMsg := protocol.NewCloseMessage(streamID)
 			if err := connItem.WriteMessage(websocket.BinaryMessage, closeMsg.Encode()); err != nil {
 				s.log.Debug("发送 CLOSE 消息失败: %v", err)
 			} else {
 				s.log.Debug("发送 CLOSE 消息 -> Stream[%s]", streamIDStr)
 			}
 
-			timeoutTimer.Stop()
-			if s.cfg.EnableStats && (bytesSent > 0 || bytesReceived > 0) {
-				s.pool.RecordDataTransfer(bytesSent, bytesReceived)
-			}
 			clientConn.Close()
 			targetAddr, _ := s.pool.UnregisterStreamHandler(connItem, streamID)
 			s.pool.ReleaseConnection(connItem)
+			elapsed := time.Since(requestStartTime)
+			if bytesSent > 0 || bytesReceived > 0 {
+				totalBytes := bytesSent + bytesReceived
+				speedKBps := float64(totalBytes) / 1024.0 / elapsed.Seconds()
+				s.log.Info("请求完成 -> %s:%d | WS[%s] Stream[%s] 耗时=%dms ↑%s ↓%s 速度=%.1fKB/s",
+					originalHost, port, connIDStr, streamIDStr, elapsed.Milliseconds(),
+					formatBytes(bytesSent), formatBytes(bytesReceived), speedKBps)
+			}
 			s.log.Debug("清理完成: WS[%s] Stream[%s] -> %s", connIDStr, streamIDStr, targetAddr)
 
 			// 通知主 goroutine 连接已关闭
@@ -299,10 +331,17 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 					connected = true
 					// 增加 Stream 计数
 					connItem.Traffic.IncStream()
-					timeoutTimer.Stop()
-					if s.cfg.EnableStats {
-						s.pool.RecordRequestSuccess(requestStartTime)
+					// 记录请求成功
+					connItem.RecordSuccess()
+					// 记录 Stream 级别的 RTT 和成功（从发送 CONNECT 到收到 CONNECTED）
+					connectLatency := time.Since(requestStartTime)
+					stream := s.pool.GetStream(connItem, streamID)
+					if stream != nil {
+						stream.RecordRTT(connectLatency)
+						stream.RecordSuccess()
 					}
+					s.log.Info("连接建立 -> %s:%d | WS[%s] Stream[%s] 延迟=%dms",
+						originalHost, port, connIDStr, streamIDStr, connectLatency.Milliseconds())
 					// 发送 SOCKS5 连接成功响应
 					if _, err := clientConn.Write([]byte{socks5Version, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 						s.log.Debug("发送 SOCKS5 响应失败: %v", err)
@@ -317,11 +356,27 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 						close(done)
 					}
 				} else if msg.Type == protocol.MsgTypeClose {
+					// 连接建立前收到 CLOSE
+					connItem.RecordFailure()
+					stream := s.pool.GetStream(connItem, streamID)
+					if stream != nil {
+						stream.RecordTimeout()
+					}
 					cleanup()
 				}
 			} else {
 				if msg.Type == protocol.MsgTypeData {
 					if len(msg.Data) > 0 {
+						// 窗口流控：消耗接收窗口
+						stream := s.pool.GetStream(connItem, streamID)
+						if stream != nil {
+							if err := stream.ConsumeRecvWindow(len(msg.Data)); err != nil {
+								s.log.Debug("接收窗口耗尽: %v", err)
+								cleanup()
+								return
+							}
+						}
+
 						bytesReceived += int64(len(msg.Data))
 						// 更新连接流量统计（接收）
 						connItem.Traffic.AddRecv(int64(len(msg.Data)))
@@ -358,10 +413,20 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 			}
 
 			if connected {
+				// 窗口流控：等待发送窗口有足够空间
+				stream := s.pool.GetStream(connItem, streamID)
+				if stream != nil {
+					if err := stream.WaitForSendWindow(n); err != nil {
+						s.log.Debug("发送窗口等待超时: %v", err)
+						cleanup()
+						return
+					}
+				}
+
 				bytesSent += int64(n)
 				// 更新连接流量统计（发送）
 				connItem.Traffic.AddSent(int64(n))
-				dataMsg := protocol.NewDataMessage(wsID, streamID, buf[:n])
+				dataMsg := protocol.NewDataMessage(streamID, buf[:n])
 				if err := connItem.WriteMessage(websocket.BinaryMessage, dataMsg.Encode()); err != nil {
 					cleanup()
 					return
@@ -378,24 +443,30 @@ func (s *Server) createTunnel(clientConn net.Conn, originalHost, resolvedHost st
 		s.log.Debug("隧道建立成功: %s:%d", originalHost, port)
 		// 等待连接真正关闭
 		<-closed
-	case <-timeoutTimer.C:
-		// 连接超时
-		if !connected {
-			s.log.Warn("隧道超时: %s:%d", originalHost, port)
-			if s.cfg.EnableStats {
-				s.pool.RecordRequestTimeout()
-			}
-			cleanup()
-		}
 	case <-ctx.Done():
-		// 上下文取消
+		// 上下文超时或取消
 		if !connected {
-			s.log.Warn("隧道建立被取消: %s:%d", originalHost, port)
+			s.log.Warn("隧道超时: %s:%d | WS[%s] Stream[%s] 延迟=%dms",
+				originalHost, port, connIDStr, streamIDStr, time.Since(requestStartTime).Milliseconds())
+			connItem.RecordFailure()
+			stream := s.pool.GetStream(connItem, streamID)
+			if stream != nil {
+				stream.RecordTimeout()
+			}
 			cleanup()
 		}
 	case <-closed:
 		// 连接在建立前就关闭了
-		s.log.Debug("连接在建立前关闭: %s:%d", originalHost, port)
+		if !connected {
+			s.log.Debug("连接在建立前关闭: %s:%d | WS[%s] Stream[%s]",
+				originalHost, port, connIDStr, streamIDStr)
+			connItem.RecordFailure()
+			stream := s.pool.GetStream(connItem, streamID)
+			if stream != nil {
+				stream.RecordTimeout()
+			}
+			cleanup()
+		}
 	}
 }
 
@@ -405,4 +476,18 @@ func (s *Server) Close() error {
 		return s.server.Close()
 	}
 	return nil
+}
+
+// formatBytes 将字节数格式化为人类可读的字符串
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for n2 := n; n2/unit >= unit && exp < 5; n2 /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }

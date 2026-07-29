@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -25,12 +26,25 @@ type ConnItem struct {
 	ConnectionID []byte // 3 bytes WS ID
 	RelayAddr    string // 中转节点地址
 	CreatedAt    time.Time
-	RTT          time.Duration
+	RTT          atomic.Int64        // 存储纳秒值
 	Streams      int                 // 当前活跃流数
 	Traffic      *TrafficCounter     // 流量计数器
 	mu           sync.Mutex          // 保护 Streams 和 targets
 	writeMu      sync.Mutex          // 保护 WS 写操作
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
+
+	// 质量监控字段
+	QualityScore      int64             // 质量评分 (0-100)，原子操作
+	BaselineRTT       time.Duration     // 基线 RTT（创建时的 RTT）
+	RTTHistory        [10]time.Duration // RTT 历史（环形缓冲区）
+	RTTIndex          int               // RTT 历史索引
+	HeartbeatFailures int64             // 心跳失败次数（原子操作）
+	RequestFailures   int64             // 请求失败次数（原子操作）
+	RequestSuccesses  int64             // 请求成功次数（原子操作）
+	LastQualityCheck  time.Time         // 上次质量检查时间
+	IsDegraded        bool              // 是否已劣化
+	DegradedSince     time.Time         // 劣化开始时间
+	qualityMu         sync.Mutex        // 保护质量监控字段
 }
 
 // WriteMessage 线程安全的 WebSocket 写入方法
@@ -93,6 +107,66 @@ func (c *ConnItem) LoadFactor(maxStreams int) float64 {
 	return float64(c.Streams) / float64(maxStreams)
 }
 
+// ============================================================================
+// 质量监控方法
+// ============================================================================
+
+// RecordRTT 记录 RTT 样本
+func (c *ConnItem) RecordRTT(rtt time.Duration) {
+	c.qualityMu.Lock()
+	defer c.qualityMu.Unlock()
+
+	// 更新 RTT 历史（环形缓冲区）
+	c.RTTHistory[c.RTTIndex] = rtt
+	c.RTTIndex = (c.RTTIndex + 1) % len(c.RTTHistory)
+
+	// 更新当前 RTT（存储纳秒值）
+	c.RTT.Store(rtt.Nanoseconds())
+}
+
+// RecordSuccess 记录成功的请求
+func (c *ConnItem) RecordSuccess() {
+	atomic.AddInt64(&c.RequestSuccesses, 1)
+}
+
+// RecordFailure 记录失败的请求
+func (c *ConnItem) RecordFailure() {
+	atomic.AddInt64(&c.RequestFailures, 1)
+}
+
+// GetAverageRTT 获取平均 RTT
+func (c *ConnItem) GetAverageRTT() time.Duration {
+	c.qualityMu.Lock()
+	defer c.qualityMu.Unlock()
+
+	// 计算 RTT 历史的平均值
+	var sum time.Duration
+	count := 0
+	for _, rtt := range c.RTTHistory {
+		if rtt > 0 {
+			sum += rtt
+			count++
+		}
+	}
+
+	if count == 0 {
+		return time.Duration(c.RTT.Load()) // 如果没有历史数据，返回当前 RTT
+	}
+	return sum / time.Duration(count)
+}
+
+// GetLossRate 获取丢包率
+func (c *ConnItem) GetLossRate() float64 {
+	successes := atomic.LoadInt64(&c.RequestSuccesses)
+	failures := atomic.LoadInt64(&c.RequestFailures)
+	total := successes + failures
+
+	if total == 0 {
+		return 0
+	}
+	return float64(failures) / float64(total)
+}
+
 // StreamHandler 流处理器
 type StreamHandler struct {
 	OnMessage func(msg *protocol.Message)
@@ -119,7 +193,6 @@ type ConnectionPool struct {
 	// 目标地址亲和性映射 (用于多路复用优化)
 	targetToConn map[string]*ConnItem // 目标地址 -> 当前服务的连接
 
-	currentRelay       *relay.RelayNode
 	lastRelayFetchTime time.Time
 	currentMinPoolSize int32
 
@@ -135,18 +208,10 @@ type connRequest struct {
 
 // PoolStats 连接池统计
 type PoolStats struct {
-	Requests           int64
-	Successes          int64
-	Failures           int64
-	Timeouts           int64
-	TotalResponseTime  int64
-	MinResponseTime    int64
-	MaxResponseTime    int64
-	BytesReceived      int64
-	BytesSent          int64
 	StartTime          time.Time
 	CreatedConnections int64
 	ClosedConnections  int64
+	Failures           int64 // 连接创建失败计数
 }
 
 // NewConnectionPool 创建连接池
@@ -163,8 +228,7 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager) *Connec
 		currentMinPoolSize: int32(cfg.MinPoolSize),
 		stopChan:           make(chan struct{}),
 		stats: PoolStats{
-			StartTime:       time.Now(),
-			MinResponseTime: -1,
+			StartTime: time.Now(),
 		},
 	}
 
@@ -176,8 +240,8 @@ func NewConnectionPool(cfg *config.Config, relayMgr *relay.RelayManager) *Connec
 	go p.cullLoop()
 	go p.statsLoop()
 	go p.heartbeatLoop()
-	go p.trafficReportLoop()
 	go p.rateUpdateLoop()
+	go p.congestionControlLoop() // 拥塞控制循环
 
 	if cfg.EnableDynamicPool {
 		go p.dynamicPoolLoop()
@@ -204,7 +268,7 @@ func (p *ConnectionPool) Warmup() error {
 	// 分批次创建连接
 	for created < targetSize {
 		remaining := targetSize - created
-		batchSize := min(remaining, concurrency)
+		batchSize := minInt(remaining, concurrency)
 
 		// 并发创建一批连接，使用 err channel 等待每个完成
 		type result struct {
@@ -263,23 +327,16 @@ func (p *ConnectionPool) Warmup() error {
 	elapsed := time.Since(startTime)
 	p.log.Info("预热完成，创建 %d 个连接 (失败: %d)，耗时 %dms", created, failed, elapsed.Milliseconds())
 
-	// 初始化中转节点
-	p.initializeRelay()
-
 	return nil
 }
 
-// initializeRelay 初始化当前使用的节点
-func (p *ConnectionPool) initializeRelay() {
-	p.currentRelay = p.relayManager.GetCurrentBest()
-	p.lastRelayFetchTime = time.Now()
-
-	if p.currentRelay != nil {
-		p.log.Info("当前中转节点: %s:%d (%dms)",
-			p.currentRelay.IP, p.currentRelay.Port, p.currentRelay.Latency.Milliseconds())
-	} else {
-		p.log.Warn("无可用的中转节点，将使用直连模式")
+// buildWSSURL 构建 WebSocket 连接 URL（包含 proxyIP 参数）
+func (p *ConnectionPool) buildWSSURL() string {
+	url := fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+	if p.cfg.ProxyIP != "" {
+		url += "?fallbackip=" + p.cfg.ProxyIP
 	}
+	return url
 }
 
 // generateWSID 生成 WebSocket ID (3字节)
@@ -287,6 +344,35 @@ func (p *ConnectionPool) generateWSID() []byte {
 	buf := make([]byte, 3)
 	rand.Read(buf)
 	return buf
+}
+
+// getTLSConfig 获取 TLS 配置
+func (p *ConnectionPool) getTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		ServerName: p.cfg.WorkerHost,
+	}
+}
+
+// handleDialError 智能处理拨号错误
+func (p *ConnectionPool) handleDialError(err error, relay *relay.RelayNode) {
+	if err == nil {
+		return
+	}
+
+	errStr := err.Error()
+
+	// 1. 判断是否为中转节点连接失败
+	if relay != nil && (strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "timeout")) {
+		p.log.Warn("中转节点连接失败，触发节点重评")
+		go p.handleConnectionFailure()
+		return
+	}
+
+	// 2. 其他错误，仅记录日志
+	p.log.Warn("拨号失败，等待重试: %v", err)
 }
 
 // createConnectionSync 同步创建连接（用于预热），返回成功/失败
@@ -306,11 +392,22 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	atomic.AddInt64(&p.stats.CreatedConnections, 1)
 
-	// 使用缓存的节点
-	if p.currentRelay == nil {
-		p.currentRelay = p.relayManager.GetCurrentBest()
+	// 使用负载均衡选择节点
+	relay := p.relayManager.GetNextRelayWithLoadBalance()
+	// loadIncremented 仅在当前 goroutine 中使用，无需原子操作
+	var loadIncremented bool
+	if relay != nil {
+		// 增加节点负载计数
+		p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, 1)
+		loadIncremented = true
+		defer func() {
+			// 只有在连接失败时才减少负载计数
+			// 成功时由连接关闭时处理
+			if loadIncremented {
+				p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, -1)
+			}
+		}()
 	}
-	relay := p.currentRelay
 
 	var url string
 	var headers http.Header
@@ -318,7 +415,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	if relay != nil {
 		// 中转模式：URL 仍用原始 Worker，但通过 NetDial 将 TCP 连接到中转节点
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			// addr 是 workerHost:443，替换为中转节点的 IP:PORT
 			return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
@@ -326,7 +423,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
 	} else {
 		// 直连模式：也需要设置 DialTimeout，否则会无限期等待
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			return net.DialTimeout(network, addr, p.cfg.GetConnectionTimeout())
 		}
@@ -335,24 +432,26 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 
 	headers = make(http.Header)
 	headers.Set("Host", p.cfg.WorkerHost)
-	headers.Set("User-Agent", "GoClient/1.0")
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
+
+	// 获取 TLS 配置
+	tlsConfig := p.getTLSConfig()
 
 	// 配置 WebSocket Dialer
 	dialer := websocket.Dialer{
 		HandshakeTimeout: p.cfg.GetConnectionTimeout(),
-		NetDial:          customDial, // 使用自定义拨号函数（中转时替换目标 IP）
+		NetDial:          customDial,
+		TLSClientConfig:  tlsConfig,
 	}
 
 	startTime := time.Now()
 	ws, resp, err := dialer.Dial(url, headers)
 	if err != nil {
 		atomic.AddInt64(&p.stats.Failures, 1)
-
-		// 连接失败都需要记录警告信息
 		p.log.Warn("连接失败 (%s): %v (目标: %s)", reason, err, url)
 
-		// 触发强制重评
-		go p.handleConnectionFailure()
+		// 智能处理拨号错误
+		p.handleDialError(err, relay)
 
 		return false
 	}
@@ -372,12 +471,22 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
 		CreatedAt:    time.Now(),
-		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
+		// 初始化质量监控字段
+		QualityScore:      100, // 初始满分
+		BaselineRTT:       latency,
+		RTTHistory:        [10]time.Duration{},
+		RTTIndex:          0,
+		HeartbeatFailures: 0,
+		RequestFailures:   0,
+		RequestSuccesses:  0,
+		LastQualityCheck:  time.Now(),
+		IsDegraded:        false,
 	}
+	item.RTT.Store(latency.Nanoseconds())
 
-	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
 
 	// 设置 TCP NODELAY
@@ -391,7 +500,14 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	// 初始化 StreamManager（messageLoop 需要它来分发消息）
 	// 所有连接都必须在 managerByConn 中，无论是否有活跃的 stream
 	p.mu.Lock()
-	p.managerByConn[item] = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+	p.managerByConn[item] = NewStreamManager(
+		item,
+		int(p.cfg.MaxStreamsPerConnection),
+		p.cfg.GetDefaultWindowSize(),
+		p.cfg.GetMinWindowSize(),
+		p.cfg.GetMaxWindowSize(),
+		p.cfg.GetWindowTimeout(),
+	)
 	p.mu.Unlock()
 
 	// 启动消息处理循环
@@ -401,6 +517,9 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 	p.mu.Lock()
 	p.pool = append(p.pool, item)
 	p.mu.Unlock()
+
+	// 连接成功，取消 defer 的负载减 1（由连接关闭时处理）
+	loadIncremented = false
 
 	return true
 }
@@ -420,11 +539,13 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	atomic.AddInt64(&p.stats.CreatedConnections, 1)
 
-	// 使用缓存的节点
-	if p.currentRelay == nil {
-		p.currentRelay = p.relayManager.GetCurrentBest()
+	// 使用负载均衡选择节点
+	relay := p.relayManager.GetNextRelayWithLoadBalance()
+	if relay != nil {
+		// 增加节点负载计数
+		p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, 1)
+		defer p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, -1)
 	}
-	relay := p.currentRelay
 
 	var url string
 	var headers http.Header
@@ -432,7 +553,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	if relay != nil {
 		// 中转模式：URL 仍用原始 Worker，但通过 NetDial 将 TCP 连接到中转节点
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			// addr 是 workerHost:443，替换为中转节点的 IP:PORT
 			return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
@@ -440,7 +561,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
 	} else {
 		// 直连模式：也需要设置 DialTimeout，否则会无限期等待
-		url = fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+		url = p.buildWSSURL()
 		customDial = func(network, addr string) (net.Conn, error) {
 			return net.DialTimeout(network, addr, p.cfg.GetConnectionTimeout())
 		}
@@ -449,15 +570,16 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	headers = make(http.Header)
 	headers.Set("Host", p.cfg.WorkerHost)
-	headers.Set("User-Agent", "GoClient/1.0")
-	if p.cfg.UserID != "" {
-		headers.Set("Sec-WebSocket-Protocol", p.cfg.UserID)
-	}
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
+
+	// 获取 TLS 配置
+	tlsConfig := p.getTLSConfig()
 
 	// 配置 WebSocket Dialer
 	dialer := websocket.Dialer{
 		HandshakeTimeout: p.cfg.GetConnectionTimeout(),
-		NetDial:          customDial, // 使用自定义拨号函数（中转时替换目标 IP）
+		NetDial:          customDial,
+		TLSClientConfig:  tlsConfig,
 	}
 
 	// 使用 channel 和 goroutine 实现可靠的超时保护
@@ -489,17 +611,25 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 	case <-time.After(p.cfg.GetConnectionTimeout() * 2): // 外层超时保护（2倍 ConnectionTimeout）
 		atomic.AddInt64(&p.stats.Failures, 1)
 		p.log.Warn("连接失败 (%s): 总体超时 (目标: %s)", reason, url)
+		// 启动清理 goroutine，等待 Dial 完成后关闭可能泄漏的 ws/resp
+		go func() {
+			res := <-resultChan
+			if res.ws != nil {
+				res.ws.Close()
+			}
+			if res.resp != nil {
+				res.resp.Body.Close()
+			}
+		}()
 		return false
 	}
 
 	if err != nil {
 		atomic.AddInt64(&p.stats.Failures, 1)
-
-		// 连接失败都需要记录警告信息
 		p.log.Warn("连接失败 (%s): %v (目标: %s)", reason, err, url)
 
-		// 触发强制重评
-		go p.handleConnectionFailure()
+		// 智能处理拨号错误
+		p.handleDialError(err, relay)
 
 		return false
 	}
@@ -519,12 +649,22 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
 		CreatedAt:    time.Now(),
-		RTT:          latency,
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
+		// 初始化质量监控字段
+		QualityScore:      100, // 初始满分
+		BaselineRTT:       latency,
+		RTTHistory:        [10]time.Duration{},
+		RTTIndex:          0,
+		HeartbeatFailures: 0,
+		RequestFailures:   0,
+		RequestSuccesses:  0,
+		LastQualityCheck:  time.Now(),
+		IsDegraded:        false,
 	}
+	item.RTT.Store(latency.Nanoseconds())
 
-	connIDStr := fmt.Sprintf("%06x", connectionID[0]<<16|connectionID[1]<<8|connectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
 	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
 
 	// 设置 TCP NODELAY
@@ -537,7 +677,14 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	// 初始化 StreamManager（确保 messageLoop 能立即分发消息）
 	p.mu.Lock()
-	p.managerByConn[item] = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+	p.managerByConn[item] = NewStreamManager(
+		item,
+		int(p.cfg.MaxStreamsPerConnection),
+		p.cfg.GetDefaultWindowSize(),
+		p.cfg.GetMinWindowSize(),
+		p.cfg.GetMaxWindowSize(),
+		p.cfg.GetWindowTimeout(),
+	)
 	p.mu.Unlock()
 
 	// 启动消息处理循环
@@ -557,10 +704,145 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 	return true
 }
 
+// createConnectionWithRelay 使用指定的中转节点创建连接
+func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reason string) bool {
+	// 检查连接池是否已满
+	currentSize := int(len(p.pool)) + int(atomic.LoadInt32(&p.activeConnections)) +
+		int(atomic.LoadInt32(&p.pendingConnections))
+	if currentSize >= p.cfg.MaxPoolSize {
+		p.log.Debug("连接池已满 (%d/%d)，跳过创建: %s", currentSize, p.cfg.MaxPoolSize, reason)
+		return false
+	}
+
+	atomic.AddInt32(&p.pendingConnections, 1)
+	defer atomic.AddInt32(&p.pendingConnections, -1)
+
+	atomic.AddInt64(&p.stats.CreatedConnections, 1)
+
+	// 使用指定的中转节点
+	url := fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+	customDial := func(network, addr string) (net.Conn, error) {
+		return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
+	}
+	p.log.Debug("创建连接 (%s) -> 中转: %s:%d (TLS SNI: %s)", reason, relay.IP, relay.Port, p.cfg.WorkerHost)
+
+	headers := make(http.Header)
+	headers.Set("Host", p.cfg.WorkerHost)
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.140")
+
+	tlsConfig := p.getTLSConfig()
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: p.cfg.GetConnectionTimeout(),
+		NetDial:          customDial,
+		TLSClientConfig:  tlsConfig,
+	}
+
+	// 使用 channel 实现超时保护
+	type dialResult struct {
+		ws   *websocket.Conn
+		resp *http.Response
+		err  error
+	}
+	resultChan := make(chan dialResult, 1)
+
+	go func() {
+		ws, resp, err := dialer.Dial(url, headers)
+		resultChan <- dialResult{ws, resp, err}
+	}()
+
+	startTime := time.Now()
+	var ws *websocket.Conn
+	var resp *http.Response
+	var err error
+
+	select {
+	case res := <-resultChan:
+		ws, resp, err = res.ws, res.resp, res.err
+	case <-time.After(p.cfg.GetConnectionTimeout() * 2):
+		atomic.AddInt64(&p.stats.Failures, 1)
+		p.log.Warn("连接失败 (%s): 总体超时", reason)
+		// 启动清理 goroutine，等待 Dial 完成后关闭可能泄漏的 ws/resp
+		go func() {
+			res := <-resultChan
+			if res.ws != nil {
+				res.ws.Close()
+			}
+			if res.resp != nil {
+				res.resp.Body.Close()
+			}
+		}()
+		return false
+	}
+
+	if err != nil {
+		atomic.AddInt64(&p.stats.Failures, 1)
+		p.log.Warn("连接失败 (%s): %v", reason, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	latency := time.Since(startTime)
+	connectionID := p.generateWSID()
+	relayAddr := fmt.Sprintf("%s:%d", relay.IP, relay.Port)
+
+	item := &ConnItem{
+		WS:           ws,
+		ConnectionID: connectionID,
+		RelayAddr:    relayAddr,
+		CreatedAt:    time.Now(),
+		Streams:      0,
+		Traffic:      &TrafficCounter{},
+		// 初始化质量监控字段
+		QualityScore:      100,
+		BaselineRTT:       latency,
+		RTTHistory:        [10]time.Duration{},
+		RTTIndex:          0,
+		HeartbeatFailures: 0,
+		RequestFailures:   0,
+		RequestSuccesses:  0,
+		LastQualityCheck:  time.Now(),
+		IsDegraded:        false,
+	}
+	item.RTT.Store(latency.Nanoseconds())
+
+	connIDStr := fmt.Sprintf("%02x%02x%02x", connectionID[0], connectionID[1], connectionID[2])
+	p.log.Debug("新连接 [%s] 已就绪 (%s), 握手延迟: %dms", connIDStr, reason, latency.Milliseconds())
+
+	// 设置 TCP NODELAY
+	if p.cfg.EnableTcpNoDelay {
+		if nc, ok := ws.UnderlyingConn().(interface{ SetNoDelay(bool) error }); ok {
+			nc.SetNoDelay(true)
+		}
+	}
+
+	// 初始化 StreamManager
+	p.mu.Lock()
+	p.managerByConn[item] = NewStreamManager(
+		item,
+		int(p.cfg.MaxStreamsPerConnection),
+		p.cfg.GetDefaultWindowSize(),
+		p.cfg.GetMinWindowSize(),
+		p.cfg.GetMaxWindowSize(),
+		p.cfg.GetWindowTimeout(),
+	)
+	p.mu.Unlock()
+
+	// 启动消息处理循环
+	go p.messageLoop(item)
+
+	// 将连接加入池
+	p.mu.Lock()
+	p.pool = append(p.pool, item)
+	p.mu.Unlock()
+
+	return true
+}
+
 // messageLoop 消息处理循环
 func (p *ConnectionPool) messageLoop(item *ConnItem) {
 	ws := item.WS
-	connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+	connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 
 	// 设置 Pong 处理器，处理心跳响应
 	ws.SetPongHandler(func(appData string) error {
@@ -572,7 +854,11 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 			rtt := time.Since(lastPing)
 			// 使用指数移动平均 (EMA) 更新 RTT，平滑波动
 			// 新RTT = 0.7 * 旧RTT + 0.3 * 测量RTT
-			item.RTT = time.Duration(int64(item.RTT)*7/10 + int64(rtt)*3/10)
+			oldRTT := item.RTT.Load()
+			newRTT := (oldRTT*7/10 + rtt.Nanoseconds()*3/10)
+			item.RTT.Store(newRTT)
+			// 记录 RTT 到历史缓冲区
+			item.RecordRTT(rtt)
 		}
 
 		delete(p.pendingHeartbeats, connIDStr)
@@ -633,19 +919,9 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 
 // handleConnectionFailure 处理连接失败
 func (p *ConnectionPool) handleConnectionFailure() {
+	// 触发节点重新评分
 	if p.relayManager.ForceRescore() {
-		newRelay := p.relayManager.GetCurrentBest()
-		if newRelay != nil {
-			p.mu.Lock()
-			oldRelay := p.currentRelay
-			p.currentRelay = newRelay
-			p.mu.Unlock()
-
-			if oldRelay == nil || oldRelay.IP != newRelay.IP || oldRelay.Port != newRelay.Port {
-				p.log.Info("已切换中转节点: %s:%d -> %s:%d (%dms)",
-					oldRelay.IP, oldRelay.Port, newRelay.IP, newRelay.Port, newRelay.Latency.Milliseconds())
-			}
-		}
+		p.log.Info("节点重新评分完成，后续连接将使用负载均衡选择")
 	}
 }
 
@@ -679,7 +955,14 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 				// 获取或创建 StreamManager
 				mgr, ok := p.managerByConn[item]
 				if !ok {
-					mgr = NewStreamManager(item, maxStreams)
+					mgr = NewStreamManager(
+						item,
+						maxStreams,
+						p.cfg.GetDefaultWindowSize(),
+						p.cfg.GetMinWindowSize(),
+						p.cfg.GetMaxWindowSize(),
+						p.cfg.GetWindowTimeout(),
+					)
 					p.managerByConn[item] = mgr
 				}
 
@@ -814,7 +1097,7 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 			loadFactor = float64(streams) / float64(maxStreams)
 		}
 		// RTT 归一化 (假设 2000ms 为最差情况)
-		rttNorm := float64(item.RTT.Milliseconds()) / 2000.0
+		rttNorm := float64(item.RTT.Load()) / (2000.0 * 1e6)
 		if rttNorm > 1.0 {
 			rttNorm = 1.0
 		}
@@ -823,20 +1106,33 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 	}
 
 	// 1. 首先检查空闲池（优先使用空闲连接）
-	for len(p.pool) > 0 {
-		item := p.pool[len(p.pool)-1]
+	// 空闲池已按质量评分排序（在 ReleaseConnection 和 QualityMonitor 中维护）
+	var lowQualityConns []*ConnItem // 收集低质量连接，稍后关闭
+	if len(p.pool) > 0 {
+		// 直接从头部取连接（已排序，头部是最高质量）
+		for len(p.pool) > 0 {
+			item := p.pool[0]
+			p.pool = p.pool[1:]
 
-		if item.WS != nil {
+			if item.WS == nil {
+				continue
+			}
+
+			// 检查连接质量评分
+			qualityScore := atomic.LoadInt64(&item.QualityScore)
+			if qualityScore < 40 {
+				// 质量过低，收集起来稍后关闭（避免持有锁时调用 Close）
+				lowQualityConns = append(lowQualityConns, item)
+				p.log.Warn("连接 [%s] 质量过低 (分数=%d)，跳过使用", formatConnID(item.ConnectionID), qualityScore)
+				continue
+			}
+
 			selectedItem = item
-			selectedReason = "空闲连接"
+			selectedReason = fmt.Sprintf("空闲连接(质量=%d)", qualityScore)
 			selectedScore = calcScore(item, 0)
-			// 移除并标记为来自池中
-			p.pool = p.pool[:len(p.pool)-1]
 			isFromPool = true
 			break
 		}
-		// 如果 item.WS == nil，移除并继续检查下一个
-		p.pool = p.pool[:len(p.pool)-1]
 	}
 
 	// 2. 如果没有从空闲池选择到，检查亲和性连接和活跃连接
@@ -876,7 +1172,7 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 					selectedItem = item
 					selectedScore = score
 					selectedReason = fmt.Sprintf("活跃连接(streams:%d/%d, rtt:%dms)",
-						streamCount, maxStreams, item.RTT.Milliseconds())
+						streamCount, maxStreams, time.Duration(item.RTT.Load()).Milliseconds())
 				}
 			}
 		}
@@ -888,6 +1184,11 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 	}
 
 	p.mu.Unlock()
+
+	// 释放锁后，批量关闭低质量连接（避免死锁）
+	for _, conn := range lowQualityConns {
+		conn.WS.Close()
+	}
 
 	// 如果找到了连接，返回它
 	if selectedItem != nil {
@@ -929,7 +1230,7 @@ func formatConnID(connID []byte) string {
 	if len(connID) != 3 {
 		return "??????"
 	}
-	return fmt.Sprintf("%06x", connID[0]<<16|connID[1]<<8|connID[2])
+	return fmt.Sprintf("%02x%02x%02x", connID[0], connID[1], connID[2])
 }
 
 // ReleaseConnection 释放连接
@@ -948,7 +1249,22 @@ func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 		// 没有活跃的 stream，放回池中以供重用
 		// 注意：不删除 managerByConn 条目，因为 messageLoop 需要它来分发消息
 		// 连接会在关闭时由 messageLoop 的 defer 函数清理
-		p.pool = append(p.pool, item)
+
+		// 有序插入：按质量评分降序插入
+		score := atomic.LoadInt64(&item.QualityScore)
+		insertPos := len(p.pool)
+		for i := 0; i < len(p.pool); i++ {
+			if atomic.LoadInt64(&p.pool[i].QualityScore) < score {
+				insertPos = i
+				break
+			}
+		}
+
+		// 插入到正确位置
+		p.pool = append(p.pool, nil)
+		copy(p.pool[insertPos+1:], p.pool[insertPos:])
+		p.pool[insertPos] = item
+
 		atomic.AddInt32(&p.activeConnections, -1)
 	}
 	// 如果还有活跃的 stream，连接保持活跃状态，直到最后一个释放
@@ -987,7 +1303,14 @@ func (p *ConnectionPool) RegisterStreamHandler(item *ConnItem, streamID byte, ha
 	// 获取或创建 StreamManager
 	mgr, ok := p.managerByConn[item]
 	if !ok {
-		mgr = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+		mgr = NewStreamManager(
+			item,
+			int(p.cfg.MaxStreamsPerConnection),
+			p.cfg.GetDefaultWindowSize(),
+			p.cfg.GetMinWindowSize(),
+			p.cfg.GetMaxWindowSize(),
+			p.cfg.GetWindowTimeout(),
+		)
 		p.managerByConn[item] = mgr
 	}
 
@@ -1014,7 +1337,14 @@ func (p *ConnectionPool) AllocateStreamID(item *ConnItem, targetAddr string, tim
 	// 获取或创建 StreamManager
 	mgr, ok := p.managerByConn[item]
 	if !ok {
-		mgr = NewStreamManager(item, int(p.cfg.MaxStreamsPerConnection))
+		mgr = NewStreamManager(
+			item,
+			int(p.cfg.MaxStreamsPerConnection),
+			p.cfg.GetDefaultWindowSize(),
+			p.cfg.GetMinWindowSize(),
+			p.cfg.GetMaxWindowSize(),
+			p.cfg.GetWindowTimeout(),
+		)
 		p.managerByConn[item] = mgr
 	}
 	p.mu.Unlock()
@@ -1067,7 +1397,7 @@ func (p *ConnectionPool) maintainPool() {
 		int(atomic.LoadInt32(&p.pendingConnections))
 
 	if currentSize < int(p.currentMinPoolSize) {
-		p.createConnection("维护补给")
+		go p.createConnection("维护补给")
 		return
 	}
 
@@ -1092,7 +1422,7 @@ func (p *ConnectionPool) maintainPool() {
 		hasHighLoadConn := false // 是否有高负载连接
 
 		// 流数阈值：maxStreams 的 60%，超过此值认为连接负载较高
-		streamThreshold := max(int(float64(maxStreams)*0.6), 1)
+		streamThreshold := maxInt(int(float64(maxStreams)*0.6), 1)
 
 		for item, mgr := range p.managerByConn {
 			if item.WS == nil {
@@ -1119,7 +1449,7 @@ func (p *ConnectionPool) maintainPool() {
 
 	if needExpansion {
 		p.log.Info("触发按需扩容: %s", reason)
-		p.createConnection(fmt.Sprintf("按需扩容(%s)", reason))
+		go p.createConnection(fmt.Sprintf("按需扩容(%s)", reason))
 	}
 }
 
@@ -1149,7 +1479,7 @@ func (p *ConnectionPool) cullOldConnections() {
 	}
 
 	now := time.Now()
-	keepMin := min(p.cfg.MinPoolSize, int(p.currentMinPoolSize))
+	keepMin := minInt(p.cfg.MinPoolSize, int(p.currentMinPoolSize))
 
 	newPool := make([]*ConnItem, 0, beforeSize)
 	removed := 0
@@ -1158,6 +1488,11 @@ func (p *ConnectionPool) cullOldConnections() {
 	for _, item := range p.pool {
 		if removed < beforeSize-keepMin && now.Sub(item.CreatedAt) > p.cfg.GetConnectionTTL() {
 			item.WS.Close()
+			// 同步清理 StreamManager，避免 GetConnectionWithStream 命中已死连接
+			if mgr, ok := p.managerByConn[item]; ok {
+				mgr.HandleConnectionClose()
+				delete(p.managerByConn, item)
+			}
 			atomic.AddInt64(&p.stats.ClosedConnections, 1)
 			removed++
 		} else {
@@ -1212,10 +1547,10 @@ func (p *ConnectionPool) logStats() {
 	// 从 managerByConn 获取所有连接
 	p.mu.RLock()
 	for item, mgr := range p.managerByConn {
-		connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+		connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 		allConns = append(allConns, connInfo{
 			id:      connIDStr,
-			rtt:     item.RTT,
+			rtt:     time.Duration(item.RTT.Load()),
 			streams: mgr.GetStreamCount(),
 		})
 	}
@@ -1271,7 +1606,7 @@ func (p *ConnectionPool) sendHeartbeat() {
 
 	for _, item := range p.pool {
 		if item.WS != nil {
-			connIDStr := fmt.Sprintf("%06x", item.ConnectionID[0]<<16|item.ConnectionID[1]<<8|item.ConnectionID[2])
+			connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 
 			// 检查是否有待响应的心跳
 			if lastPing, ok := p.pendingHeartbeats[connIDStr]; ok {
@@ -1295,38 +1630,6 @@ func (p *ConnectionPool) sendHeartbeat() {
 	if timeout > 0 {
 		p.log.Debug("心跳超时: %d 个连接", timeout)
 	}
-}
-
-// trafficReportLoop 定期报告连接流量统计
-func (p *ConnectionPool) trafficReportLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			p.logConnectionTraffic()
-		case <-p.stopChan:
-			return
-		}
-	}
-}
-
-// logConnectionTraffic 输出所有活跃连接的流量统计
-func (p *ConnectionPool) logConnectionTraffic() {
-	connData := p.GetConnectionsData()
-	if len(connData) == 0 {
-		return
-	}
-
-	p.log.Debug("========== 连接流量统计 ==========")
-	for _, cd := range connData {
-		connIDStr := fmt.Sprintf("%02x%02x%02x", cd.ConnectionID[0], cd.ConnectionID[1], cd.ConnectionID[2])
-		p.log.Debug("WS[%s] → %s | ↑ %s | ↓ %s | Streams: %d",
-			connIDStr, cd.RelayAddr,
-			formatBytes(cd.Sent), formatBytes(cd.Recv), cd.StreamCount)
-	}
-	p.log.Debug("==================================")
 }
 
 // rateUpdateLoop 定期更新所有连接的速率统计
@@ -1379,10 +1682,10 @@ func (p *ConnectionPool) adjustPoolSize() {
 	var reason string
 
 	if utilizationRatio > p.cfg.DynamicPoolHighThreshold {
-		newSize = min(int(float64(p.currentMinPoolSize)*1.5), p.cfg.DynamicPoolMaxSize)
+		newSize = minInt(int(float64(p.currentMinPoolSize)*1.5), p.cfg.DynamicPoolMaxSize)
 		reason = fmt.Sprintf("高负载 (利用率 %.1f%%)", utilizationRatio*100)
 	} else if activeRatio < p.cfg.DynamicPoolLowThreshold && int(p.currentMinPoolSize) > p.cfg.DynamicPoolMinSize {
-		newSize = max(int(float64(p.currentMinPoolSize)*0.7), p.cfg.DynamicPoolMinSize)
+		newSize = maxInt(int(float64(p.currentMinPoolSize)*0.7), p.cfg.DynamicPoolMinSize)
 		reason = fmt.Sprintf("低负载 (活跃率 %.1f%%)", activeRatio*100)
 	} else {
 		return
@@ -1396,96 +1699,11 @@ func (p *ConnectionPool) adjustPoolSize() {
 		if newSize > total {
 			p.log.Info("触发动态扩容: %d -> %d (%s)", total, newSize, reason)
 			needed := newSize - total
-			for i := 0; i < min(needed, 5); i++ {
+			for i := 0; i < minInt(needed, 5); i++ {
 				go p.createConnection("动态扩容")
 			}
 		}
 	}
-}
-
-// GetEnhancedStats 获取增强统计信息
-func (p *ConnectionPool) GetEnhancedStats() PoolStatsInfo {
-	uptime := time.Since(p.stats.StartTime)
-	successRate := 0.0
-	if p.stats.Requests > 0 {
-		successRate = float64(p.stats.Successes) / float64(p.stats.Requests) * 100
-	}
-	avgResponseTime := 0.0
-	if p.stats.Successes > 0 {
-		avgResponseTime = float64(p.stats.TotalResponseTime) / float64(p.stats.Successes)
-	}
-
-	return PoolStatsInfo{
-		Requests:           p.stats.Requests,
-		Successes:          p.stats.Successes,
-		Failures:           p.stats.Failures,
-		Timeouts:           p.stats.Timeouts,
-		SuccessRate:        successRate,
-		AvgResponseTime:    avgResponseTime,
-		MinResponseTime:    float64(p.stats.MinResponseTime),
-		MaxResponseTime:    float64(p.stats.MaxResponseTime),
-		BytesSent:          p.stats.BytesSent,
-		BytesReceived:      p.stats.BytesReceived,
-		Uptime:             uptime,
-		CreatedConnections: p.stats.CreatedConnections,
-		ClosedConnections:  p.stats.ClosedConnections,
-		PoolSize:           len(p.pool),
-		ActiveConnections:  int(atomic.LoadInt32(&p.activeConnections)),
-		PendingConnections: int(atomic.LoadInt32(&p.pendingConnections)),
-		QueuedRequests:     len(p.requestQueue),
-	}
-}
-
-// RecordRequestStart 记录请求开始
-func (p *ConnectionPool) RecordRequestStart() int64 {
-	atomic.AddInt64(&p.stats.Requests, 1)
-	return time.Now().UnixMilli()
-}
-
-// RecordRequestSuccess 记录请求成功
-func (p *ConnectionPool) RecordRequestSuccess(startTime int64) {
-	atomic.AddInt64(&p.stats.Successes, 1)
-	responseTime := time.Now().UnixMilli() - startTime
-	atomic.AddInt64(&p.stats.TotalResponseTime, responseTime)
-
-	// 更新最小/最大响应时间
-	for {
-		min := atomic.LoadInt64(&p.stats.MinResponseTime)
-		if min == -1 || responseTime < min {
-			if atomic.CompareAndSwapInt64(&p.stats.MinResponseTime, min, responseTime) {
-				break
-			}
-		} else {
-			break
-		}
-	}
-
-	for {
-		max := atomic.LoadInt64(&p.stats.MaxResponseTime)
-		if responseTime > max {
-			if atomic.CompareAndSwapInt64(&p.stats.MaxResponseTime, max, responseTime) {
-				break
-			}
-		} else {
-			break
-		}
-	}
-}
-
-// RecordRequestFailure 记录请求失败
-func (p *ConnectionPool) RecordRequestFailure() {
-	atomic.AddInt64(&p.stats.Failures, 1)
-}
-
-// RecordRequestTimeout 记录请求超时
-func (p *ConnectionPool) RecordRequestTimeout() {
-	atomic.AddInt64(&p.stats.Timeouts, 1)
-}
-
-// RecordDataTransfer 记录数据传输
-func (p *ConnectionPool) RecordDataTransfer(sent, received int64) {
-	atomic.AddInt64(&p.stats.BytesSent, sent)
-	atomic.AddInt64(&p.stats.BytesReceived, received)
 }
 
 // UpdateAllRates 更新所有连接的速率统计
@@ -1528,117 +1746,80 @@ func (p *ConnectionPool) Close() {
 	p.managerByConn = nil
 }
 
-// PoolStatsInfo 连接池统计信息
-type PoolStatsInfo struct {
-	Requests           int64
-	Successes          int64
-	Failures           int64
-	Timeouts           int64
-	SuccessRate        float64
-	AvgResponseTime    float64
-	MinResponseTime    float64
-	MaxResponseTime    float64
-	BytesSent          int64
-	BytesReceived      int64
-	Uptime             time.Duration
-	CreatedConnections int64
-	ClosedConnections  int64
-	PoolSize           int
-	ActiveConnections  int
-	PendingConnections int
-	QueuedRequests     int
-}
-
-// ConnectionData 连接数据（用于 metrics 暴露）
-type ConnectionData struct {
-	ConnectionID []byte
-	RelayAddr    string
-	RTT          time.Duration
-	Sent         int64
-	Recv         int64
-	StreamCount  int          // 使用 StreamManager.GetStreamCount() 作为权威来源
-	RateSnapshot RateSnapshot // 速率快照数据
-}
-
-// RateSnapshot 速率快照数据
-type RateSnapshot struct {
-	AvgSent float64 // 平均发送速率 (字节/秒)
-	MaxSent float64 // 最大发送速率 (字节/秒)
-	AvgRecv float64 // 平均接收速率 (字节/秒)
-	MaxRecv float64 // 最大接收速率 (字节/秒)
-}
-
-// GetConnectionsData 获取所有连接的数据（用于 metrics 暴露）
-// 返回包含流量统计和 stream 计数的连接数据列表
-func (p *ConnectionPool) GetConnectionsData() []ConnectionData {
-	p.mu.RLock()
-	result := make([]ConnectionData, 0, len(p.pool)+len(p.managerByConn))
-
-	// 从空闲池获取连接
-	for _, conn := range p.pool {
-		sent, recv, _ := conn.Traffic.GetSnapshot()
-		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
-		result = append(result, ConnectionData{
-			ConnectionID: conn.ConnectionID,
-			RelayAddr:    conn.RelayAddr,
-			RTT:          conn.RTT,
-			Sent:         sent,
-			Recv:         recv,
-			StreamCount:  0, // 空闲连接没有 stream
-			RateSnapshot: RateSnapshot{
-				AvgSent: avgSent,
-				MaxSent: maxSent,
-				AvgRecv: avgRecv,
-				MaxRecv: maxRecv,
-			},
-		})
+// GetStream 获取指定的 Stream 对象（用于流控）
+func (p *ConnectionPool) GetStream(conn *ConnItem, streamID byte) *Stream {
+	if conn == nil {
+		return nil
 	}
 
-	// 从 managerByConn 获取连接及其 stream 计数
-	for conn, mgr := range p.managerByConn {
-		sent, recv, _ := conn.Traffic.GetSnapshot()
-		avgSent, maxSent, avgRecv, maxRecv := conn.Traffic.GetRateSnapshot()
-		result = append(result, ConnectionData{
-			ConnectionID: conn.ConnectionID,
-			RelayAddr:    conn.RelayAddr,
-			RTT:          conn.RTT,
-			Sent:         sent,
-			Recv:         recv,
-			StreamCount:  mgr.GetStreamCount(), // 使用 StreamManager.GetStreamCount() 作为权威来源
-			RateSnapshot: RateSnapshot{
-				AvgSent: avgSent,
-				MaxSent: maxSent,
-				AvgRecv: avgRecv,
-				MaxRecv: maxRecv,
-			},
-		})
+	p.mu.RLock()
+	mgr, exists := p.managerByConn[conn]
+	p.mu.RUnlock()
+
+	if !exists || mgr == nil {
+		return nil
+	}
+
+	mgr.mu.RLock()
+	defer mgr.mu.RUnlock()
+
+	return mgr.streams[streamID]
+}
+
+// congestionControlLoop 拥塞控制循环
+func (p *ConnectionPool) congestionControlLoop() {
+	ticker := time.NewTicker(p.cfg.GetCongestionControlInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			p.adjustAllStreamsWindow()
+		case <-p.stopChan:
+			return
+		}
+	}
+}
+
+// adjustAllStreamsWindow 调整所有活跃 Stream 的窗口大小
+func (p *ConnectionPool) adjustAllStreamsWindow() {
+	p.mu.RLock()
+	managers := make([]*StreamManager, 0, len(p.managerByConn))
+	for _, mgr := range p.managerByConn {
+		managers = append(managers, mgr)
 	}
 	p.mu.RUnlock()
 
-	// 去重（同一连接可能同时存在于 pool 和 managerByConn）
-	seen := make(map[string]struct{})
-	unique := make([]ConnectionData, 0, len(result))
-	for _, cd := range result {
-		connIDStr := fmt.Sprintf("%02x%02x%02x", cd.ConnectionID[0], cd.ConnectionID[1], cd.ConnectionID[2])
-		if _, exists := seen[connIDStr]; !exists {
-			seen[connIDStr] = struct{}{}
-			unique = append(unique, cd)
+	adjustedCount := 0
+	for _, mgr := range managers {
+		mgr.mu.RLock()
+		streams := make([]*Stream, 0, len(mgr.streams))
+		for _, s := range mgr.streams {
+			streams = append(streams, s)
+		}
+		mgr.mu.RUnlock()
+
+		for _, stream := range streams {
+			stream.AdjustWindowSize()
+			adjustedCount++
 		}
 	}
 
-	return unique
+	if adjustedCount > 0 {
+		p.log.Debug("拥塞控制: 调整了 %d 个 Stream 的窗口大小", adjustedCount)
+	}
 }
 
-// min 返回最小值
-func min(a, b int) int {
+// minInt 返回两个 int 中较小的那个
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
 
-// max 返回最大值
-func max(a, b int) int {
+// maxInt 返回两个 int 中较大的那个
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
