@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -224,7 +225,7 @@ func (dc *DNSCache) GetECHConfig(domain string) ([]byte, error) {
 
 // ResolveAny 解析域名（优先 A 记录，失败则尝试 AAAA）
 func (dc *DNSCache) ResolveAny(domain string) (string, string, error) {
-	// 优先尝试 A 记录
+	// 优先尝试 A 记录（走 DoH，命中缓存则瞬间返回）
 	ip, err := dc.ResolveA(domain)
 	if err == nil {
 		return ip, "A", nil
@@ -236,6 +237,23 @@ func (dc *DNSCache) ResolveAny(domain string) (string, string, error) {
 		return ip, "AAAA", nil
 	}
 
+	// DoH 全部失败，回退系统 DNS（避免新域名等待所有 DoH 超时）
+	dc.log.Debug("DoH 无结果，回退系统 DNS: %s", domain)
+	sysIPs, sysErr := LookupIP(domain)
+	if sysErr == nil && len(sysIPs) > 0 {
+		ip = sysIPs[0]
+		queryType := "A"
+		if IsIPv6(ip) {
+			queryType = "AAAA"
+		}
+		// 缓存系统 DNS 结果，避免后续重复回退
+		dc.Set(domain, queryType, ip)
+		return ip, queryType, nil
+	}
+
+	if sysErr != nil {
+		return "", "", fmt.Errorf("DoH 和系统 DNS 均失败: DoH=%v, sys=%v", err, sysErr)
+	}
 	return "", "", err
 }
 
@@ -305,26 +323,62 @@ func (dc *DNSCache) GetStats() CacheStatsInfo {
 }
 
 // Warmup 预热缓存（常用域名）
+// 并行解析，带总超时控制，避免长时间占用 DoH 资源
 func (dc *DNSCache) Warmup(domains []string) {
 	// 合并默认列表和自定义列表
 	allDomains := mergeUnique(DefaultWarmupDomains, domains)
 
 	dc.log.Info("开始预热 %d 个域名...", len(allDomains))
 	startTime := time.Now()
-	successCount := 0
+
+	// 总超时 15 秒，避免在 DoH 全不可用的环境下无限制等待
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var successCount int64
+	var wg sync.WaitGroup
+
+	// 限制并发数为 8，避免瞬间打满 DoH 服务器
+	sem := make(chan struct{}, 8)
 
 	for _, domain := range allDomains {
-		if _, err := dc.ResolveA(domain); err == nil {
-			successCount++
+		// 总超时时停止派发新任务
+		if ctx.Err() != nil {
+			break
 		}
-		if _, err := dc.ResolveAAAA(domain); err == nil {
-			successCount++
-		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			if _, err := dc.ResolveA(d); err == nil {
+				atomic.AddInt64(&successCount, 1)
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := dc.ResolveAAAA(d); err == nil {
+				atomic.AddInt64(&successCount, 1)
+			}
+		}(domain)
 	}
 
+	wg.Wait()
+
 	elapsed := time.Since(startTime)
-	dc.log.Info("预热完成: 成功%d条, 当前缓存%d条, 耗时%dms",
-		successCount, len(dc.cache), elapsed.Milliseconds())
+	if ctx.Err() != nil {
+		dc.log.Warn("预热超时截断: 成功%d条, 当前缓存%d条, 耗时%dms",
+			atomic.LoadInt64(&successCount), len(dc.cache), elapsed.Milliseconds())
+	} else {
+		dc.log.Info("预热完成: 成功%d条, 当前缓存%d条, 耗时%dms",
+			atomic.LoadInt64(&successCount), len(dc.cache), elapsed.Milliseconds())
+	}
 }
 
 // mergeUnique 合并两个域名列表，去重
