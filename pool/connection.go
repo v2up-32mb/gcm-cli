@@ -32,6 +32,7 @@ type ConnItem struct {
 	mu           sync.Mutex          // 保护 Streams 和 targets
 	writeMu      sync.Mutex          // 保护 WS 写操作
 	targets      map[string]struct{} // 该连接服务的前往目标地址集合 (用于多路复用亲和性)
+	closed       atomic.Bool         // 连接是否已关闭（WS.Close 后置 true）
 
 	// 质量监控字段
 	QualityScore      int64             // 质量评分 (0-100)，原子操作
@@ -52,6 +53,11 @@ func (c *ConnItem) WriteMessage(messageType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.WS.WriteMessage(messageType, data)
+}
+
+// IsClosed 返回连接是否已关闭
+func (c *ConnItem) IsClosed() bool {
+	return c.closed.Load()
 }
 
 // AddTarget 添加目标地址到该连接的服务集合
@@ -898,6 +904,9 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 			mgrToClose.HandleConnectionClose()
 		}
 
+		// 标记连接已关闭，防止 GetConnectionWithStream 取到已死连接
+		item.closed.Store(true)
+
 		// 静默关闭 WebSocket（忽略 "already closed" 错误）
 		ws.Close() // nolint:errcheck
 	}()
@@ -959,7 +968,7 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 			item := p.pool[len(p.pool)-1]
 			p.pool = p.pool[:len(p.pool)-1]
 
-			if item.WS != nil {
+			if item.WS != nil && !item.IsClosed() {
 				// 获取或创建 StreamManager
 				mgr, ok := p.managerByConn[item]
 				if !ok {
@@ -988,12 +997,13 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 				// 放回池的最前面（下次优先使用）
 				p.pool = append([]*ConnItem{item}, p.pool...)
 			}
+			// item.WS == nil 或 IsClosed()：跳过已死连接，不回放
 		}
 
 		// 2. 检查亲和性连接
 		if targetAddr != "" && p.cfg.EnableMultiplex {
 			if affinityConn, exists := p.targetToConn[targetAddr]; exists {
-				if mgr, ok := p.managerByConn[affinityConn]; ok && affinityConn.WS != nil {
+				if mgr, ok := p.managerByConn[affinityConn]; ok && affinityConn.WS != nil && !affinityConn.IsClosed() {
 					streamID, allocated := mgr.tryAllocateStream(targetAddr)
 					if allocated {
 						p.mu.Unlock()
@@ -1009,7 +1019,7 @@ func (p *ConnectionPool) GetConnectionWithStream(ctx context.Context, targetAddr
 		if p.cfg.EnableMultiplex {
 			minStreams := maxStreams + 1
 			for item, mgr := range p.managerByConn {
-				if item.WS == nil {
+				if item.WS == nil || item.IsClosed() {
 					continue
 				}
 				streamCount := mgr.GetStreamCount()
@@ -1122,7 +1132,8 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 			item := p.pool[0]
 			p.pool = p.pool[1:]
 
-			if item.WS == nil {
+			if item.WS == nil || item.IsClosed() {
+				// 跳过已死连接，不回放
 				continue
 			}
 
@@ -1148,7 +1159,7 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 		// 检查目标地址亲和性
 		if targetAddr != "" {
 			if affinityConn, exists := p.targetToConn[targetAddr]; exists {
-				if mgr, ok := p.managerByConn[affinityConn]; ok && affinityConn.WS != nil {
+				if mgr, ok := p.managerByConn[affinityConn]; ok && affinityConn.WS != nil && !affinityConn.IsClosed() {
 					streamCount := mgr.GetStreamCount()
 					hasSpace := streamCount < maxStreams
 
@@ -1165,7 +1176,7 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 		// 3. 如果没有亲和连接，从活跃连接中找最优的
 		if selectedItem == nil {
 			for item, mgr := range p.managerByConn {
-				if item.WS == nil {
+				if item.WS == nil || item.IsClosed() {
 					continue
 				}
 
@@ -1195,6 +1206,19 @@ func (p *ConnectionPool) GetConnection(ctx context.Context, targetAddr string) (
 
 	// 释放锁后，批量关闭低质量连接（避免死锁）
 	for _, conn := range lowQualityConns {
+		// 从 managerByConn 中清除，避免后续被命中
+		p.mu.Lock()
+		mgr, hasMgr := p.managerByConn[conn]
+		if hasMgr {
+			delete(p.managerByConn, conn)
+		}
+		atomic.AddInt64(&p.stats.ClosedConnections, 1)
+		p.mu.Unlock()
+		// 标记 closed 防止并发取到，再通知 + 关闭
+		conn.closed.Store(true)
+		if hasMgr {
+			mgr.HandleConnectionClose()
+		}
 		conn.WS.Close()
 	}
 
@@ -1254,26 +1278,32 @@ func (p *ConnectionPool) ReleaseConnection(item *ConnItem) {
 	}
 
 	if streamCount == 0 {
-		// 没有活跃的 stream，放回池中以供重用
-		// 注意：不删除 managerByConn 条目，因为 messageLoop 需要它来分发消息
-		// 连接会在关闭时由 messageLoop 的 defer 函数清理
+		if item.IsClosed() {
+			// 连接已关闭，不放回池中
+			// managerByConn 由 messageLoop defer 负责清理
+			atomic.AddInt32(&p.activeConnections, -1)
+		} else {
+			// 没有活跃的 stream，放回池中以供重用
+			// 注意：不删除 managerByConn 条目，因为 messageLoop 需要它来分发消息
+			// 连接会在关闭时由 messageLoop 的 defer 函数清理
 
-		// 有序插入：按质量评分降序插入
-		score := atomic.LoadInt64(&item.QualityScore)
-		insertPos := len(p.pool)
-		for i := 0; i < len(p.pool); i++ {
-			if atomic.LoadInt64(&p.pool[i].QualityScore) < score {
-				insertPos = i
-				break
+			// 有序插入：按质量评分降序插入
+			score := atomic.LoadInt64(&item.QualityScore)
+			insertPos := len(p.pool)
+			for i := 0; i < len(p.pool); i++ {
+				if atomic.LoadInt64(&p.pool[i].QualityScore) < score {
+					insertPos = i
+					break
+				}
 			}
+
+			// 插入到正确位置
+			p.pool = append(p.pool, nil)
+			copy(p.pool[insertPos+1:], p.pool[insertPos:])
+			p.pool[insertPos] = item
+
+			atomic.AddInt32(&p.activeConnections, -1)
 		}
-
-		// 插入到正确位置
-		p.pool = append(p.pool, nil)
-		copy(p.pool[insertPos+1:], p.pool[insertPos:])
-		p.pool[insertPos] = item
-
-		atomic.AddInt32(&p.activeConnections, -1)
 	}
 	// 如果还有活跃的 stream，连接保持活跃状态，直到最后一个释放
 }
@@ -1478,11 +1508,18 @@ func (p *ConnectionPool) cullLoop() {
 
 // cullOldConnections 清理过期连接
 func (p *ConnectionPool) cullOldConnections() {
+	// 收集需要关闭的连接，在锁外处理以避免死锁
+	type culledConn struct {
+		ws  *websocket.Conn
+		mgr *StreamManager
+	}
+	var culled []culledConn
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	beforeSize := len(p.pool)
 	if beforeSize == 0 {
+		p.mu.Unlock()
 		return
 	}
 
@@ -1492,16 +1529,17 @@ func (p *ConnectionPool) cullOldConnections() {
 	newPool := make([]*ConnItem, 0, beforeSize)
 	removed := 0
 
-	// 按创建时间排序
 	for _, item := range p.pool {
 		if removed < beforeSize-keepMin && now.Sub(item.CreatedAt) > p.cfg.GetConnectionTTL() {
-			item.WS.Close()
-			// 同步清理 StreamManager，避免 GetConnectionWithStream 命中已死连接
-			if mgr, ok := p.managerByConn[item]; ok {
-				mgr.HandleConnectionClose()
+			// 标记为已关闭，防止 GetConnectionWithStream 命中
+			item.closed.Store(true)
+			var mgr *StreamManager
+			if m, ok := p.managerByConn[item]; ok {
+				mgr = m
 				delete(p.managerByConn, item)
 			}
 			atomic.AddInt64(&p.stats.ClosedConnections, 1)
+			culled = append(culled, culledConn{ws: item.WS, mgr: mgr})
 			removed++
 		} else {
 			newPool = append(newPool, item)
@@ -1509,8 +1547,20 @@ func (p *ConnectionPool) cullOldConnections() {
 	}
 
 	p.pool = newPool
+	p.mu.Unlock()
+
 	if removed > 0 {
 		p.log.Debug("清理过期连接: 清除%d个 (%d -> %d)", removed, beforeSize, len(p.pool))
+	}
+
+	// 锁外关闭 WebSocket 和通知 StreamManager
+	for _, c := range culled {
+		if c.mgr != nil {
+			c.mgr.HandleConnectionClose()
+		}
+		if c.ws != nil {
+			c.ws.Close() // nolint:errcheck
+		}
 	}
 }
 
@@ -1606,37 +1656,75 @@ func (p *ConnectionPool) heartbeatLoop() {
 
 // sendHeartbeat 发送心跳
 func (p *ConnectionPool) sendHeartbeat() {
+	// 收集需要关闭的连接，在锁外处理以避免死锁
+	// （messageLoop defer 中的清理会获取 p.mu.Lock）
+	type deadConn struct {
+		item *ConnItem
+		ws   *websocket.Conn
+		mgr  *StreamManager
+	}
+	var deadConns []deadConn
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	now := time.Now()
 	timeout := 0
 
+	// 遍历 pool，发送心跳或检测超时
+	newPool := make([]*ConnItem, 0, len(p.pool))
 	for _, item := range p.pool {
-		if item.WS != nil {
-			connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
+		if item.WS == nil || item.IsClosed() {
+			// 已关闭的连接直接跳过（messageLoop defer 负责清理）
+			newPool = append(newPool, item)
+			continue
+		}
+		connIDStr := fmt.Sprintf("%02x%02x%02x", item.ConnectionID[0], item.ConnectionID[1], item.ConnectionID[2])
 
-			// 检查是否有待响应的心跳
-			if lastPing, ok := p.pendingHeartbeats[connIDStr]; ok {
-				if now.Sub(lastPing) > p.cfg.GetHeartbeatTimeout() {
-					p.log.Debug("连接 [%s] 心跳超时，移除", connIDStr)
-					item.WS.Close()
-					delete(p.pendingHeartbeats, connIDStr)
-					timeout++
-				}
+		var shouldClose bool
+		// 检查是否有待响应的心跳
+		if lastPing, ok := p.pendingHeartbeats[connIDStr]; ok {
+			if now.Sub(lastPing) > p.cfg.GetHeartbeatTimeout() {
+				p.log.Debug("连接 [%s] 心跳超时，移除", connIDStr)
+				delete(p.pendingHeartbeats, connIDStr)
+				timeout++
+				shouldClose = true
+			}
+		} else {
+			// 发送新心跳
+			if err := item.WriteMessage(websocket.PingMessage, nil); err == nil {
+				p.pendingHeartbeats[connIDStr] = now
 			} else {
-				// 发送新心跳
-				if err := item.WriteMessage(websocket.PingMessage, nil); err == nil {
-					p.pendingHeartbeats[connIDStr] = now
-				} else {
-					item.WS.Close()
-				}
+				shouldClose = true
 			}
 		}
+
+		if shouldClose {
+			// 标记为已关闭，从 pool 和 managerByConn 中移除
+			item.closed.Store(true)
+			var mgr *StreamManager
+			if m, ok := p.managerByConn[item]; ok {
+				mgr = m
+				delete(p.managerByConn, item)
+			}
+			atomic.AddInt64(&p.stats.ClosedConnections, 1)
+			deadConns = append(deadConns, deadConn{item: item, ws: item.WS, mgr: mgr})
+		} else {
+			newPool = append(newPool, item)
+		}
 	}
+	p.pool = newPool
+	p.mu.Unlock()
 
 	if timeout > 0 {
 		p.log.Debug("心跳超时: %d 个连接", timeout)
+	}
+
+	// 锁外关闭 WebSocket 和通知 StreamManager（避免死锁）
+	for _, dc := range deadConns {
+		if dc.mgr != nil {
+			dc.mgr.HandleConnectionClose()
+		}
+		dc.ws.Close() // nolint:errcheck
 	}
 }
 
