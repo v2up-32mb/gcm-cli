@@ -1,7 +1,6 @@
 package pool
 
 import (
-	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -11,7 +10,6 @@ import (
 
 	"gcm/config"
 	"gcm/logger"
-	"gcm/relay"
 )
 
 // ConnectionQualityMonitor 连接质量监控器
@@ -194,34 +192,23 @@ func (m *ConnectionQualityMonitor) considerRelaySwitching() {
 
 // switchToNewRelay 切换到新节点
 func (m *ConnectionQualityMonitor) switchToNewRelay(oldRelayAddr string) {
-	// 1. 使用负载均衡选择新节点（最多尝试 3 次避免选中旧节点）
-	var newRelay *relay.RelayNode
-	for i := 0; i < 3; i++ {
-		newRelay = m.pool.relayManager.GetNextRelayWithLoadBalance()
-		if newRelay == nil {
-			break
-		}
-		// 如果选中的不是旧节点，成功
-		if fmt.Sprintf("%s:%d", newRelay.IP, newRelay.Port) != oldRelayAddr {
-			break
-		}
-		// 否则继续尝试
-		newRelay = nil
-	}
-
+	// 问题 6：使用 GetBestRelayExcluding 直接排除旧节点（替代 3 次循环 hack）。
+	newRelay := m.pool.relayManager.GetBestRelayExcluding(oldRelayAddr)
 	if newRelay == nil {
-		m.log.Warn("没有可用的替代节点")
-		return
-	}
-
-	// 如果 3 次尝试后仍是旧节点，说明只有一个节点
-	if fmt.Sprintf("%s:%d", newRelay.IP, newRelay.Port) == oldRelayAddr {
-		m.log.Warn("无法找到不同的替代节点（可能只有一个节点）")
+		m.log.Warn("没有可用的替代节点（可能只有一个节点）")
 		return
 	}
 
 	m.log.Info("切换节点: %s -> %s:%d (延迟: %v)",
 		oldRelayAddr, newRelay.IP, newRelay.Port, newRelay.Latency)
+
+	// 问题 6：给旧节点记一次失败（渐进式交给 ReportFailure 阈值移除），
+	// 避免旧节点在下次 GetNextRelayWithLoadBalance 中被再次选中。
+	if host, portStr, err := net.SplitHostPort(oldRelayAddr); err == nil {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			m.pool.relayManager.ReportFailure(host, port)
+		}
+	}
 
 	// 2. 标记旧节点的连接为"待淘汰"
 	m.pool.mu.Lock()

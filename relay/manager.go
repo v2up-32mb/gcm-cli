@@ -1,8 +1,9 @@
 package relay
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,7 +75,6 @@ type RelayManager struct {
 	log                  *logger.Logger
 	dnsCache             *dns.DNSCache
 	stopChan             chan struct{}
-	rng                  *rand.Rand // 独立随机数生成器（避免全局状态竞争）
 }
 
 // NewRelayManager 创建中转节点管理器
@@ -85,7 +85,6 @@ func NewRelayManager(relayList []string, cfg *config.Config, dnsCache *dns.DNSCa
 		log:       logger.GetLogger("Relay"),
 		dnsCache:  dnsCache,
 		stopChan:  make(chan struct{}),
-		rng:       rand.New(rand.NewSource(time.Now().UnixNano())), // 独立随机数生成器
 	}
 }
 
@@ -101,49 +100,9 @@ func (rm *RelayManager) Init() error {
 
 	rm.log.Info("开始初始化中转节点，配置数: %d...", len(rm.rawRelays))
 
-	// 解析所有输入
-	candidateNodes := make([]*RelayNode, 0)
-	for _, raw := range rm.rawRelays {
-		host, port := ParseHostPort(raw)
-
-		if ip := net.ParseIP(host); ip != nil {
-			rm.log.Debug("直接添加 IP 节点: %s:%d", host, port)
-			candidateNodes = append(candidateNodes, &RelayNode{
-				IP:     host,
-				Port:   port,
-				Source: raw,
-			})
-		} else {
-			// 域名解析（优先 DoH，回退系统 DNS）
-			rm.log.Debug("正在解析域名: %s ...", host)
-			ips, err := rm.dnsCache.LookupIPs(host)
-			if err != nil {
-				rm.log.Error("解析中转域名 %s 失败: %v", host, err)
-				continue
-			}
-
-			if len(ips) > 0 {
-				rm.log.Debug("域名 %s 解析到 %d 个 IP 地址", host, len(ips))
-				// 测速并选择最优的
-				domainCandidates := make([]*RelayNode, 0)
-				for _, ip := range ips {
-					domainCandidates = append(domainCandidates, &RelayNode{
-						IP:     ip,
-						Port:   port,
-						Source: host,
-					})
-				}
-
-				testedNodes := rm.batchTestLatency(domainCandidates)
-				// 选择 Top 2
-				bestOfDomain := min(len(testedNodes), 2)
-				candidateNodes = append(candidateNodes, testedNodes[:bestOfDomain]...)
-				rm.log.Debug("域名 %s 优选了 %d 个节点", host, bestOfDomain)
-			} else {
-				rm.log.Warn("域名 %s 解析结果为空", host)
-			}
-		}
-	}
+	// 解析所有输入：域名解析得到的全部 IP 都直接加入候选列表，
+	// 不在域名分支内做测速截断，统一在最后做一次 batchTestLatency。
+	candidateNodes := rm.resolveCandidates(rm.rawRelays)
 
 	// 初始测速并初始化节点状态
 	rm.log.Debug("开始批量测速 %d 个候选节点...", len(candidateNodes))
@@ -194,6 +153,86 @@ func (rm *RelayManager) Init() error {
 	return nil
 }
 
+// resolveCandidates 从原始配置列表重新解析域名并构建候选节点列表。
+// IP 类节点直接加入；域名类节点解析出全部 IP 后逐个加入（不在域名层做测速截断）。
+// 多个域名的解析并发执行以减少整体解析耗时。
+func (rm *RelayManager) resolveCandidates(rawRelays []string) []*RelayNode {
+	if len(rawRelays) == 0 {
+		return nil
+	}
+
+	// 预先将 IP 类节点直接放入，域名类收集到 domainEntries 并发解析。
+	candidateNodes := make([]*RelayNode, 0, len(rawRelays))
+	var domainEntries []string
+
+	for _, raw := range rawRelays {
+		host, port := ParseHostPort(raw)
+		if ip := net.ParseIP(host); ip != nil {
+			rm.log.Debug("直接添加 IP 节点: %s:%d", host, port)
+			candidateNodes = append(candidateNodes, &RelayNode{
+				IP:     host,
+				Port:   port,
+				Source: raw,
+			})
+		} else {
+			domainEntries = append(domainEntries, raw)
+		}
+	}
+
+	// 无域名类节点，直接返回。
+	if len(domainEntries) == 0 {
+		return candidateNodes
+	}
+
+	// 并发解析域名（问题 11）。
+	type resolveResult struct {
+		host string
+		port int
+		ips  []string
+		err  error
+	}
+	resultChan := make(chan resolveResult, len(domainEntries))
+	var wg sync.WaitGroup
+	for _, raw := range domainEntries {
+		host, port := ParseHostPort(raw)
+		wg.Add(1)
+		go func(h string, p int) {
+			defer wg.Done()
+			if rm.dnsCache == nil {
+				// 无 DNS 缓存（如测试环境）：尝试系统 DNS 解析。
+				ips, err := net.LookupHost(h)
+				resultChan <- resolveResult{host: h, port: p, ips: ips, err: err}
+				return
+			}
+			ips, err := rm.dnsCache.LookupIPs(h)
+			resultChan <- resolveResult{host: h, port: p, ips: ips, err: err}
+		}(host, port)
+	}
+	wg.Wait()
+	close(resultChan)
+
+	for rr := range resultChan {
+		if rr.err != nil {
+			rm.log.Error("解析中转域名 %s 失败: %v", rr.host, rr.err)
+			continue
+		}
+		if len(rr.ips) == 0 {
+			rm.log.Warn("域名 %s 解析结果为空", rr.host)
+			continue
+		}
+		rm.log.Debug("域名 %s 解析到 %d 个 IP 地址", rr.host, len(rr.ips))
+		for _, ip := range rr.ips {
+			candidateNodes = append(candidateNodes, &RelayNode{
+				IP:     ip,
+				Port:   rr.port,
+				Source: rr.host,
+			})
+		}
+	}
+
+	return candidateNodes
+}
+
 // calculateScore 计算节点分数
 func (rm *RelayManager) calculateScore(latency time.Duration, failCount int) int {
 	return int(latency.Milliseconds()) + (failCount * 500)
@@ -207,43 +246,98 @@ func (rm *RelayManager) rescoreLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			rm.rescoreAll()
+			rm.doRescore("定期重评")
 		case <-rm.stopChan:
 			return
 		}
 	}
 }
 
-// rescoreAll 全面重新评分
-func (rm *RelayManager) rescoreAll() {
-	rm.mu.RLock()
-	if len(rm.allNodes) == 0 {
-		rm.mu.RUnlock()
-		rm.log.Debug("无可用节点，跳过重新评分")
+// doRescore 统一重评入口：从 rawRelays 重新解析域名并测速，更新 allNodes/optimalRelays。
+// 定期重评和强制重评共用此函数，确保 DNS 变化被感知且被剔除节点可恢复。
+// trigger 仅用于日志。
+func (rm *RelayManager) doRescore(trigger string) {
+	startTime := time.Now()
+
+	// 从原始配置重新解析域名（改造 A：定期与强制重评统一）。
+	candidateNodes := rm.resolveCandidates(rm.rawRelays)
+
+	if len(candidateNodes) == 0 {
+		rm.log.Debug("重评(%s): 无候选节点，跳过", trigger)
+		// 仍要清空现有节点列表以反映配置变化。
+		rm.mu.Lock()
+		rm.allNodes = nil
+		rm.optimalRelays = nil
+		rm.mu.Unlock()
 		return
 	}
-	relays := make([]*RelayNode, len(rm.allNodes))
-	copy(relays, rm.allNodes)
-	rm.mu.RUnlock()
 
-	startTime := time.Now()
-	rm.log.Info("开始全面重新评分 %d 个节点...", len(relays))
+	rm.log.Info("重评(%s): 开始测速 %d 个候选节点...", trigger, len(candidateNodes))
 
-	results := rm.batchTestLatency(relays)
+	// 在锁外测速（candidateNodes 是新解析的临时节点指针，测速只更新其 Latency）。
+	tested := rm.batchTestLatency(candidateNodes)
 
 	rm.mu.Lock()
-	rm.totalTestCount += len(results)
+	rm.totalTestCount += len(tested)
 
-	// 更新所有节点的状态
-	rm.allNodes = make([]*RelayNode, 0, len(results))
-	for _, r := range results {
-		r.LastCheck = time.Now()
-		r.Score = rm.calculateScore(r.Latency, r.FailCount)
-		rm.allNodes = append(rm.allNodes, r)
+	beforeCount := len(rm.optimalRelays)
+
+	// 构建 IP+Port -> 旧节点 映射（allNodes + optimalRelays 合集去重），
+	// 用于在新一轮解析结果中识别已存在的节点并复用其原指针，
+	// 以保留 ActiveConnections/AvgQualityScore/TotalConnections/FailCount 等稳定元信息。
+	oldByAddr := make(map[string]*RelayNode, len(rm.allNodes)+len(rm.optimalRelays))
+	for _, n := range rm.allNodes {
+		oldByAddr[net.JoinHostPort(n.IP, strconv.Itoa(n.Port))] = n
+	}
+	for _, n := range rm.optimalRelays {
+		key := net.JoinHostPort(n.IP, strconv.Itoa(n.Port))
+		if _, ok := oldByAddr[key]; !ok {
+			oldByAddr[key] = n
+		}
 	}
 
-	// 仅保留低于延迟阈值的节点作为最优节点
-	beforeCount := len(rm.optimalRelays)
+	// 更新所有节点的状态：优先复用旧指针并原地更新 Latency/LastCheck/Score，
+	// 避免进行中的连接池 UpdateNodeLoad(-1) 在重评后错加到新对象上（问题 3）。
+	rm.allNodes = make([]*RelayNode, 0, len(tested))
+	for _, r := range tested {
+		key := net.JoinHostPort(r.IP, strconv.Itoa(r.Port))
+		if old, ok := oldByAddr[key]; ok {
+			// 复用旧指针，仅更新测速数据。
+			old.Latency = r.Latency
+			old.LastCheck = time.Now()
+			old.Score = rm.calculateScore(old.Latency, old.FailCount)
+			rm.allNodes = append(rm.allNodes, old)
+		} else {
+			// 全新节点（如 DNS 新增 IP）。
+			r.LastCheck = time.Now()
+			r.Score = rm.calculateScore(r.Latency, r.FailCount)
+			rm.allNodes = append(rm.allNodes, r)
+		}
+	}
+
+	// 重建 optimalRelays ：按延迟从 allNodes 过滤，并按延迟排序。
+	rm.rebuildOptimalRelays()
+	validCount := len(rm.optimalRelays)
+	rm.mu.Unlock()
+
+	elapsed := time.Since(startTime)
+	diff := validCount - beforeCount
+	if diff >= 0 {
+		rm.log.Info("重评(%s)完成: 有效%d个 (新增%d个), 耗时%dms",
+			trigger, validCount, diff, elapsed.Milliseconds())
+	} else {
+		rm.log.Info("重评(%s)完成: 有效%d个 (移除%d个), 耗时%dms",
+			trigger, validCount, -diff, elapsed.Milliseconds())
+	}
+	// logTopRelays acquires a read lock. Call it only after releasing the
+	// rescore write lock so periodic rescoring cannot deadlock relay selection.
+	rm.logTopRelays()
+}
+
+// rebuildOptimalRelays 根据当前 allNodes 重建 optimalRelays。
+// 调用者必须持有写锁。
+// doRescore 已在外层完成"旧指针复用"逻辑，此处仅做延迟过滤与排序。
+func (rm *RelayManager) rebuildOptimalRelays() {
 	rm.optimalRelays = make([]*RelayNode, 0)
 	for _, r := range rm.allNodes {
 		if r.Latency < rm.cfg.GetRelayMaxLatency() {
@@ -251,40 +345,17 @@ func (rm *RelayManager) rescoreAll() {
 			rm.optimalRelays = append(rm.optimalRelays, r)
 		}
 	}
-	validCount := len(rm.optimalRelays)
-	rm.mu.Unlock()
-
-	elapsed := time.Since(startTime)
-	diff := validCount - beforeCount
-	if diff >= 0 {
-		rm.log.Info("重新评分完成: 有效%d个 (新增%d个), 耗时%dms",
-			validCount, diff, elapsed.Milliseconds())
-	} else {
-		rm.log.Info("重新评分完成: 有效%d个 (移除%d个), 耗时%dms",
-			validCount, -diff, elapsed.Milliseconds())
-	}
-	// logTopRelays acquires a read lock. Call it only after releasing the
-	// rescore write lock so periodic rescoring cannot deadlock relay selection.
-	rm.logTopRelays()
+	// 按延迟排序（问题 7：统一按 Latency 排序）。
+	sort.Slice(rm.optimalRelays, func(i, j int) bool {
+		return rm.optimalRelays[i].Latency < rm.optimalRelays[j].Latency
+	})
 }
 
-// resortByScoreLocked 按分数重新排序（调用者必须持有写锁）
-func (rm *RelayManager) resortByScoreLocked() {
-	// 按分数排序（冒泡排序）
-	for i := 0; i < len(rm.optimalRelays)-1; i++ {
-		for j := i + 1; j < len(rm.optimalRelays); j++ {
-			if rm.optimalRelays[i].Score > rm.optimalRelays[j].Score {
-				rm.optimalRelays[i], rm.optimalRelays[j] = rm.optimalRelays[j], rm.optimalRelays[i]
-			}
-		}
-	}
-}
-
-// resortByScore 按分数重新排序（公开版本，自动加锁）
-func (rm *RelayManager) resortByScore() {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-	rm.resortByScoreLocked()
+// resortByLatencyLocked 按延迟重新排序（调用者必须持有写锁）
+func (rm *RelayManager) resortByLatencyLocked() {
+	sort.Slice(rm.optimalRelays, func(i, j int) bool {
+		return rm.optimalRelays[i].Latency < rm.optimalRelays[j].Latency
+	})
 }
 
 // ReportFailure 记录失败
@@ -315,10 +386,21 @@ func (rm *RelayManager) ReportFailure(ip string, port int) {
 			rm.totalRemovedCount++
 			rm.log.Warn("节点 %s:%d 连续失败 %d 次，已移除 (累计移除: %d)",
 				ip, port, rm.cfg.RelayFailureThreshold, rm.totalRemovedCount)
-			// 移除节点
+			// 从 optimalRelays 和 allNodes 同步移除（问题 5）。
 			rm.optimalRelays = append(rm.optimalRelays[:idx], rm.optimalRelays[idx+1:]...)
+			rm.removeFromAllNodesLocked(ip, port)
 		} else {
-			rm.resortByScoreLocked()
+			rm.resortByLatencyLocked()
+		}
+	}
+}
+
+// removeFromAllNodesLocked 从 allNodes 中移除指定节点（调用者必须持有写锁）
+func (rm *RelayManager) removeFromAllNodesLocked(ip string, port int) {
+	for i, n := range rm.allNodes {
+		if n.IP == ip && n.Port == port {
+			rm.allNodes = append(rm.allNodes[:i], rm.allNodes[i+1:]...)
+			return
 		}
 	}
 }
@@ -369,7 +451,12 @@ func (rm *RelayManager) testLatency(node *RelayNode) *RelayNode {
 	start := time.Now()
 	address := net.JoinHostPort(node.IP, strconv.Itoa(node.Port))
 
-	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
+	// 问题 8：使用配置的连接超时，与真实拨号一致；nil cfg 兜底 2 秒。
+	timeout := 2 * time.Second
+	if rm.cfg != nil {
+		timeout = rm.cfg.GetConnectionTimeout()
+	}
+	conn, err := net.DialTimeout("tcp", address, timeout)
 	if err != nil {
 		node.Latency = 9999 * time.Millisecond
 		return node
@@ -380,59 +467,30 @@ func (rm *RelayManager) testLatency(node *RelayNode) *RelayNode {
 	return node
 }
 
-// batchTestLatency 批量测速
+// batchTestLatency 批量测速（问题 3：原地更新传入节点的 Latency，不创建新指针对象）。
+// 每个 goroutine 操作不同的节点指针因此无竞争；返回的切片包含同一组指针。
 func (rm *RelayManager) batchTestLatency(nodes []*RelayNode) []*RelayNode {
 	if len(nodes) == 0 {
 		return nodes
 	}
 
-	// 并发测速
-	type result struct {
-		node *RelayNode
-	}
-	results := make(chan result, len(nodes))
-
+	// 并发测速：原地更新节点的 Latency 字段。
 	var wg sync.WaitGroup
 	for _, node := range nodes {
 		wg.Add(1)
 		go func(n *RelayNode) {
 			defer wg.Done()
-			// 复制节点避免并发问题，同时保留负载统计数据
-			nodeCopy := &RelayNode{
-				IP:     n.IP,
-				Port:   n.Port,
-				Source: n.Source,
-				// 保留负载均衡相关数据（重评时不应丢失）
-				ActiveConnections: n.ActiveConnections,
-				TotalConnections:  n.TotalConnections,
-				AvgQualityScore:   n.AvgQualityScore,
-				Weight:            n.Weight,
-				// 保留其他状态
-				FailCount: n.FailCount,
-				LastCheck: n.LastCheck,
-				Score:     n.Score,
-			}
-			results <- result{node: rm.testLatency(nodeCopy)}
+			rm.testLatency(n) // 直接更新 n.Latency
 		}(node)
 	}
-
 	wg.Wait()
-	close(results)
 
-	// 收集结果并排序
-	resultNodes := make([]*RelayNode, 0, len(nodes))
-	for r := range results {
-		resultNodes = append(resultNodes, r.node)
-	}
-
-	// 按延迟排序
-	for i := 0; i < len(resultNodes)-1; i++ {
-		for j := i + 1; j < len(resultNodes); j++ {
-			if resultNodes[i].Latency > resultNodes[j].Latency {
-				resultNodes[i], resultNodes[j] = resultNodes[j], resultNodes[i]
-			}
-		}
-	}
+	// 复制结果切片并按延迟排序（问题 10：sort.Slice 替代冒泡）。
+	resultNodes := make([]*RelayNode, len(nodes))
+	copy(resultNodes, nodes)
+	sort.Slice(resultNodes, func(i, j int) bool {
+		return resultNodes[i].Latency < resultNodes[j].Latency
+	})
 
 	return resultNodes
 }
@@ -448,7 +506,7 @@ func (rm *RelayManager) ForceRescore() bool {
 		return false
 	}
 	rm.lastForceRescoreTime = now
-	// 直接访问数据，避免在持有写锁时调用需要读锁的方法（防止死锁）
+
 	var beforeBest *RelayNode
 	if rm.isInitialized && len(rm.optimalRelays) > 0 {
 		beforeBest = rm.optimalRelays[0]
@@ -462,62 +520,12 @@ func (rm *RelayManager) ForceRescore() bool {
 		rm.log.Warn("触发强制重新评分 (无可用节点)...")
 	}
 
-	// 重新解析原始节点列表并测速
-	candidateNodes := make([]*RelayNode, 0)
-	for _, raw := range rm.rawRelays {
-		host, port := ParseHostPort(raw)
-		if ip := net.ParseIP(host); ip != nil {
-			candidateNodes = append(candidateNodes, &RelayNode{
-				IP:     host,
-				Port:   port,
-				Source: raw,
-			})
-		} else {
-			ips, err := rm.dnsCache.LookupIPs(host)
-			if err != nil {
-				rm.log.Error("解析域名 %s 失败: %v", host, err)
-				continue
-			}
-			if len(ips) > 0 {
-				for _, ip := range ips {
-					candidateNodes = append(candidateNodes, &RelayNode{
-						IP:     ip,
-						Port:   port,
-						Source: host,
-					})
-				}
-			}
-		}
-	}
+	rm.doRescore("强制重评")
 
-	// 批量测速并更新
-	results := rm.batchTestLatency(candidateNodes)
-
-	rm.mu.Lock()
-	rm.totalTestCount += len(results)
-
-	// 更新所有节点
-	rm.allNodes = make([]*RelayNode, 0, len(results))
-	for _, r := range results {
-		r.LastCheck = now
-		r.Score = rm.calculateScore(r.Latency, r.FailCount)
-		rm.allNodes = append(rm.allNodes, r)
-	}
-
-	// 仅保留低于延迟阈值的节点作为最优节点
-	rm.optimalRelays = make([]*RelayNode, 0)
-	for _, r := range rm.allNodes {
-		if r.Latency < rm.cfg.GetRelayMaxLatency() {
-			r.FailCount = 0
-			rm.optimalRelays = append(rm.optimalRelays, r)
-		}
-	}
-
-	rm.resortByScoreLocked()
-
+	rm.mu.RLock()
 	afterBest := rm.getNextRelayLocked()
 	validCount := len(rm.optimalRelays)
-	rm.mu.Unlock()
+	rm.mu.RUnlock()
 
 	rm.log.Info("强制重评完成: 有效节点%d个", validCount)
 	if beforeBest != nil && afterBest != nil {
@@ -657,6 +665,7 @@ type weightedNode struct {
 }
 
 // selectByWeight 按权重随机选择节点（加权轮询）
+// 问题 1：使用 math/rand/v2 全局并发安全 API 替代非线程安全的 *rand.Rand。
 func (rm *RelayManager) selectByWeight(candidates []*RelayNode) *RelayNode {
 	if len(candidates) == 0 {
 		return nil
@@ -676,11 +685,11 @@ func (rm *RelayManager) selectByWeight(candidates []*RelayNode) *RelayNode {
 
 	if totalWeight == 0 {
 		// 所有权重为0，随机选择
-		return candidates[rm.rng.Intn(len(candidates))]
+		return candidates[rand.IntN(len(candidates))]
 	}
 
 	// 加权随机选择
-	r := rm.rng.Float64() * totalWeight
+	r := rand.Float64() * totalWeight
 	cumulative := 0.0
 	for _, wn := range weights {
 		cumulative += wn.weight
