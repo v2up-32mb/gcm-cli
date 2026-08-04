@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ type ConnItem struct {
 	WS           *websocket.Conn
 	ConnectionID []byte // 3 bytes WS ID
 	RelayAddr    string // 中转节点地址
+	IsRelay      bool   // 是否走中转节点（true 时关闭前需 UpdateNodeLoad -1）
 	CreatedAt    time.Time
 	RTT          atomic.Int64        // 存储纳秒值
 	Streams      int                 // 当前活跃流数
@@ -372,7 +374,10 @@ func (p *ConnectionPool) handleDialError(err error, relay *relay.RelayNode) {
 	if relay != nil && (strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "timeout")) {
-		p.log.Warn("中转节点连接失败，触发节点重评")
+		p.log.Warn("中转节点连接失败，记录失败并触发节点重评")
+		// 问题 5：渐进式失败计数（达阈值由 RelayManager 移除节点），
+		// 然后再触发全量重评。两条路径互补。
+		p.relayManager.ReportFailure(relay.IP, relay.Port)
 		go p.handleConnectionFailure()
 		return
 	}
@@ -476,6 +481,7 @@ func (p *ConnectionPool) createConnectionSync(reason string) bool {
 		WS:           ws,
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
+		IsRelay:      relay != nil,
 		CreatedAt:    time.Now(),
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
@@ -547,10 +553,17 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 
 	// 使用负载均衡选择节点
 	relay := p.relayManager.GetNextRelayWithLoadBalance()
+	// loadIncremented 仅在当前 goroutine 中使用，无需原子操作；与 Sync 路径一致：
+	// 拨号失败时在此函数内减 1；拨号成功则由 messageLoop defer 在连接真正关闭时减 1。
+	var loadIncremented bool
 	if relay != nil {
-		// 增加节点负载计数
 		p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, 1)
-		defer p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, -1)
+		loadIncremented = true
+		defer func() {
+			if loadIncremented {
+				p.relayManager.UpdateNodeLoad(relay.IP, relay.Port, -1)
+			}
+		}()
 	}
 
 	var url string
@@ -654,6 +667,7 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		WS:           ws,
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
+		IsRelay:      relay != nil,
 		CreatedAt:    time.Now(),
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
@@ -706,6 +720,9 @@ func (p *ConnectionPool) createConnection(reason string) bool {
 		p.pool = append(p.pool, item)
 		p.mu.Unlock()
 	}
+
+	// 连接成功，取消 defer 的负载减 1（由连接关闭时 messageLoop defer 减 1）。
+	loadIncremented = false
 
 	return true
 }
@@ -796,6 +813,7 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 		WS:           ws,
 		ConnectionID: connectionID,
 		RelayAddr:    relayAddr,
+		IsRelay:      true,
 		CreatedAt:    time.Now(),
 		Streams:      0,
 		Traffic:      &TrafficCounter{},
@@ -906,6 +924,16 @@ func (p *ConnectionPool) messageLoop(item *ConnItem) {
 
 		// 标记连接已关闭，防止 GetConnectionWithStream 取到已死连接
 		item.closed.Store(true)
+
+		// 问题 4：中转连接关闭时减少该节点的 ActiveConnections，
+		// 与创建时 +1 配对（创建成功由 createConnection* 设 IsRelay=true 并不再在函数 defer 中减 1）。
+		if item.IsRelay {
+			if host, portStr, err := net.SplitHostPort(item.RelayAddr); err == nil {
+				if rp, err := strconv.Atoi(portStr); err == nil {
+					p.relayManager.UpdateNodeLoad(host, rp, -1)
+				}
+			}
+		}
 
 		// 静默关闭 WebSocket（忽略 "already closed" 错误）
 		ws.Close() // nolint:errcheck
@@ -1510,8 +1538,10 @@ func (p *ConnectionPool) cullLoop() {
 func (p *ConnectionPool) cullOldConnections() {
 	// 收集需要关闭的连接，在锁外处理以避免死锁
 	type culledConn struct {
-		ws  *websocket.Conn
-		mgr *StreamManager
+		ws        *websocket.Conn
+		mgr       *StreamManager
+		relayAddr string
+		isRelay   bool
 	}
 	var culled []culledConn
 
@@ -1539,7 +1569,7 @@ func (p *ConnectionPool) cullOldConnections() {
 				delete(p.managerByConn, item)
 			}
 			atomic.AddInt64(&p.stats.ClosedConnections, 1)
-			culled = append(culled, culledConn{ws: item.WS, mgr: mgr})
+			culled = append(culled, culledConn{ws: item.WS, mgr: mgr, relayAddr: item.RelayAddr, isRelay: item.IsRelay})
 			removed++
 		} else {
 			newPool = append(newPool, item)
@@ -1557,6 +1587,13 @@ func (p *ConnectionPool) cullOldConnections() {
 	for _, c := range culled {
 		if c.mgr != nil {
 			c.mgr.HandleConnectionClose()
+		}
+		if c.isRelay && c.relayAddr != "" {
+			if host, portStr, err := net.SplitHostPort(c.relayAddr); err == nil {
+				if rp, err := strconv.Atoi(portStr); err == nil {
+					p.relayManager.UpdateNodeLoad(host, rp, -1)
+				}
+			}
 		}
 		if c.ws != nil {
 			c.ws.Close() // nolint:errcheck

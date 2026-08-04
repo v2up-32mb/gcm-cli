@@ -503,3 +503,8 @@ func DefaultConfig() *Config {
 		QualityMinDegradedCount:    2,                              // 至少2个劣化连接才触发切换
 	}
 }
+
+// NewYamlDuration 创建一个 yamlDuration 包装器（供外部包构造测试用配置）。
+func NewYamlDuration(d time.Duration) yamlDuration {
+	return yamlDuration{d}
+}
