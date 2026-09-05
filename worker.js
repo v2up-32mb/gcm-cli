@@ -12,6 +12,9 @@
  * - Worker -> 客户端: [STREAM_ID:1][TYPE:1=2][binary_data]
  * - Worker -> 客户端: [STREAM_ID:1][TYPE:1=3]
  *
+ * 出口顺序: 直连原始 host > 客户端 ?fallbackip= > 动态节点 API（env.DYNAMIC_NODES_URL）> 静态 fallback（env.FALLBACK_IPS，
+ *   每项支持 host 或 host:port；无硬编码默认值）
+ *
  * 部署说明:
  * 1. 登录 Cloudflare Dashboard
  * 2. 进入 Workers & Pages
@@ -27,20 +30,46 @@ import { connect } from "cloudflare:sockets";
 const WS_READY_STATE_OPEN = 1;
 const WS_READY_STATE_CLOSING = 2;
 
-// ==================== 默认配置 ====================
-const DEFAULT_KV_CONFIG = {
+// ==================== 默认配置（兜底值；一切配置统一从环境变量读取） ====================
+const DEFAULT_CONFIG = {
   enableFallback: true,
   connectTimeout: 1000,
   enableLogging: false,
   maxStreamsPerConnection: 16,
+  enableDynamicNodes: true,
+  dynamicNodesUrl: "",
+  dynamicNodesTimeout: 3000, // 拉取动态列表超时 3s，失败直接降级
 };
 
-const DEFAULT_FALLBACK_IPS = [
-  "proxyip.us.cmliussss.net",
-  "proxyip.hk.cmliussss.net",
-  "proxyip.jp.cmliussss.net",
-  "tw.william.us.ci",
-];
+function parseEnvBool(v, fallback) {
+  if (v === undefined || v === null || String(v).trim() === "") return fallback;
+  const s = String(v).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(s)) return true;
+  if (["0", "false", "no", "off"].includes(s)) return false;
+  return fallback;
+}
+
+function parseEnvInt(v, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  if (!Number.isSafeInteger(n) || n < min || n > max) return fallback;
+  return n;
+}
+
+// 一切配置从环境变量组装，不依赖 KV
+function buildConfigFromEnv(env) {
+  return {
+    enableFallback: parseEnvBool(env.ENABLE_FALLBACK, DEFAULT_CONFIG.enableFallback),
+    connectTimeout: parseEnvInt(env.CONNECT_TIMEOUT, DEFAULT_CONFIG.connectTimeout, { min: 100, max: 30000 }),
+    enableLogging: parseEnvBool(env.ENABLE_LOGGING, DEFAULT_CONFIG.enableLogging),
+    maxStreamsPerConnection: parseEnvInt(env.MAX_STREAMS_PER_CONNECTION, DEFAULT_CONFIG.maxStreamsPerConnection, { min: 1, max: 256 }),
+    enableDynamicNodes: parseEnvBool(env.ENABLE_DYNAMIC_NODES, DEFAULT_CONFIG.enableDynamicNodes),
+    dynamicNodesUrl: (env.DYNAMIC_NODES_URL || "").trim(),
+    dynamicNodesTimeout: parseEnvInt(env.DYNAMIC_NODES_TIMEOUT, DEFAULT_CONFIG.dynamicNodesTimeout, { min: 500, max: 30000 }),
+  };
+}
+
+// 保留空数组仅为兼容历史引用，静态 fallback 只从环境变量 FALLBACK_IPS 读取
+const DEFAULT_FALLBACK_IPS = [];
 
 // ==================== 消息类型常量 ====================
 const MSG_TYPE = {
@@ -108,14 +137,114 @@ function parseAddress(addr) {
   };
 }
 
-// 判断是否为 CF 内部连接错误
-function isCFError(err) {
-  const msg = err?.message?.toLowerCase() || "";
-  return (
-    msg.includes("proxy request") ||
-    msg.includes("cannot connect") ||
-    msg.includes("cloudflare")
-  );
+// 解析 fallback 条目，支持 `host`、`host:port`、`[ipv6]`、`[ipv6]:port`
+// 不带端口时继承目标端口（保持旧行为）
+function parseFallbackEntry(entry, defaultPort) {
+  const s = String(entry || "").trim();
+  // [ipv6] 或 [ipv6]:port
+  if (s[0] === "[") {
+    const end = s.indexOf("]");
+    if (end === -1) return null;
+    const host = s.substring(1, end);
+    if (!host) return null;
+    const rest = s.substring(end + 1);
+    if (!rest) return { host, port: defaultPort };
+    if (rest[0] !== ":") return null;
+    const port = parseInt(rest.substring(1), 10);
+    if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) return null;
+    return { host, port };
+  }
+  // host / host:port（IPv6 裸地址必须加方括号，否则冒号无法区分端口）
+  const sep = s.lastIndexOf(":");
+  if (sep === -1) {
+    if (!s) return null;
+    return { host: s, port: defaultPort };
+  }
+  const port = parseInt(s.substring(sep + 1), 10);
+  if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) {
+    // 冒号后缀不是合法端口：视为非法条目，跳过（避免把裸 IPv6 误解析）
+    return null;
+  }
+  const host = s.substring(0, sep);
+  if (!host) return null;
+  return { host, port };
+}
+
+// ==================== 动态兜底节点 ====================
+// Workers isolate 生命周期短，不做 TTL 缓存：每次用到都现拉 API。
+// 仅保留单飞（并发流共用一次请求）+ 失败时复用上次结果的 stale 降级。
+let dynamicNodesCache = { entries: [], inflight: null };
+
+function normalizeNodeEntry(host, port) {
+  let h = String(host ?? "").trim();
+  if (!h) return null;
+  // API 可能返回裸 IPv6，统一加方括号，后续走 parseFallbackEntry 解析
+  if (h.includes(":") && h[0] !== "[") h = `[${h}]`;
+  if (port !== undefined && port !== null && String(port).trim() !== "") {
+    const p = parseInt(port, 10);
+    if (!Number.isSafeInteger(p) || p <= 0 || p > 65535) return null;
+    return `${h}:${p}`;
+  }
+  return h;
+}
+
+async function fetchDynamicNodes(config) {
+  // 地址统一从环境变量读取，无硬编码默认值；未配置则直接降级为空
+  const url = (config.dynamicNodesUrl || "").trim();
+  if (!url) return [];
+  const timeoutMs = config.dynamicNodesTimeout || 3000;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const arr = Array.isArray(data) ? data : data.nodes || data.data || [];
+    const out = [];
+    const seen = new Set();
+    for (const item of arr) {
+      if (!item || typeof item !== "object") continue;
+      const entry = normalizeNodeEntry(
+        item.ip || item.host || item.address,
+        item.port,
+      );
+      if (!entry) continue;
+      const key = entry.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(entry);
+      if (out.length >= 20) break;
+    }
+    return out;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getDynamicFallbacks(config) {
+  if (config.enableDynamicNodes === false) return [];
+  if (!(config.dynamicNodesUrl || "").trim()) return [];
+  // 无 TTL：每次现拉，仅单飞合并并发请求
+  if (dynamicNodesCache.inflight) {
+    try {
+      return await dynamicNodesCache.inflight;
+    } catch {
+      return dynamicNodesCache.entries;
+    }
+  }
+  const p = fetchDynamicNodes(config)
+    .then((entries) => {
+      dynamicNodesCache.entries = entries;
+      dynamicNodesCache.inflight = null;
+      return entries;
+    })
+    .catch((err) => {
+      console.error(`[DynamicNodes] 拉取失败: ${err.message}`);
+      dynamicNodesCache.inflight = null;
+      return dynamicNodesCache.entries; // 有 stale 用 stale，全新失败则为 []
+    });
+  dynamicNodesCache.inflight = p;
+  return p;
 }
 
 // 安全关闭 WebSocket
@@ -178,84 +307,153 @@ class StreamManager {
     this.streamCount++;
 
     let { host, port } = parseAddress(targetAddr);
-    const attempts = this.config.enableFallback
-      ? [null, ...this.config.cfFallbackIPs]
-      : [null];
+    // 出口顺序：直连 > 客户端传入 fallback > 动态节点 > 静态 fallback
+    // 1. 直连优先
+    {
+      const r = await this.tryDial(streamId, host, port, "直连");
+      if (r === "connected") return true;
+      if (r === "aborted") return false;
+    }
 
-    for (let i = 0; i < attempts.length; i++) {
-      const attemptHost = attempts[i] || host;
-      const attemptDesc = attempts[i] === null ? "直连" : `fallback[${i}]`;
+    if (this.config.enableFallback) {
+      // 去重集合：前面已试过的，后面不再重复试
+      const seenHosts = new Set();
+      const markOrSeen = (parsed) => {
+        const key = `${parsed.host.toLowerCase()}:${parsed.port}`;
+        if (seenHosts.has(key)) return true;
+        seenHosts.add(key);
+        return false;
+      };
 
-      try {
-        this.log(`[${streamId}] 尝试${attemptDesc}: ${attemptHost}:${port}`);
-
-        const remoteSocket = connect({
-          hostname: attemptHost,
-          port,
-        });
-
-        // 添加超时控制
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(
-            () => reject(new Error("Connection timeout")),
-            this.config.connectTimeout,
-          );
-        });
-
-        // 等待连接建立或超时
-        await Promise.race([remoteSocket.opened, timeoutPromise]);
-
-        const remoteWriter = remoteSocket.writable.getWriter();
-        const remoteReader = remoteSocket.readable.getReader();
-
-        // 更新已预注册的 stream：绑定真实的 socket 并 flush 缓存数据
-        const stream = this.streams.get(streamId);
-        if (!stream || stream.isClosed) {
-          // 在 TCP 连接过程中流已被关闭
-          try { remoteWriter.releaseLock(); } catch {}
-          try { remoteSocket.close(); } catch {}
-          return false;
+      // 2. 客户端传入的 fallback（?fallbackip=）
+      const queries = this.config.cfQueryFallbackIPs || [];
+      for (let i = 0; i < queries.length; i++) {
+        const parsed = parseFallbackEntry(queries[i], port);
+        if (!parsed) {
+          this.log(`[${streamId}] 跳过非法query-fallback[${i + 1}/${queries.length}]: ${queries[i]}`);
+          continue;
         }
-        stream.remoteSocket = remoteSocket;
-        stream.remoteWriter = remoteWriter;
-        stream.remoteReader = remoteReader;
-        stream.tcpConnected = true;
+        if (markOrSeen(parsed)) continue;
+        const r = await this.tryDial(
+          streamId,
+          parsed.host,
+          parsed.port,
+          `query-fallback[${i + 1}/${queries.length}]`,
+        );
+        if (r === "connected") return true;
+        if (r === "aborted") return false;
+      }
 
-        this.log(`[${streamId}] ${attemptDesc}成功`);
+      // 3. 动态节点
+      const dynamics = await getDynamicFallbacks(this.config);
+      let dynIndex = 0;
+      for (const entry of dynamics) {
+        const parsed = parseFallbackEntry(entry, port);
+        if (!parsed) continue;
+        if (markOrSeen(parsed)) continue;
+        dynIndex++;
+        const r = await this.tryDial(
+          streamId,
+          parsed.host,
+          parsed.port,
+          `dynamic[${dynIndex}/${dynamics.length}]`,
+        );
+        if (r === "connected") return true;
+        if (r === "aborted") return false;
+      }
 
-        // Flush 缓存的早期数据到远程 socket
-        if (stream.pendingBuffer.length > 0) {
-          this.log(`[${streamId}] flush ${stream.pendingBuffer.length} 条缓存数据`);
-          for (const pending of stream.pendingBuffer) {
-            try {
-              await remoteWriter.write(pending);
-            } catch (e) {
-              this.log(`[${streamId}] flush 写入失败: ${e.message}`);
-              this.closeStream(streamId);
-              return false;
-            }
-          }
-          stream.pendingBuffer = [];
+      // 4. 静态 fallback（仅 env.FALLBACK_IPS）
+      const statics = this.config.cfFallbackIPs || [];
+      for (let i = 0; i < statics.length; i++) {
+        const parsed = parseFallbackEntry(statics[i], port);
+        if (!parsed) {
+          this.log(`[${streamId}] 跳过非法fallback[${i + 1}/${statics.length}]: ${statics[i]}`);
+          continue;
         }
-
-        this.sendConnected(streamId);
-
-        // 启动数据转发
-        this.pumpRemoteToWebSocket(streamId, remoteReader);
-
-        return true;
-      } catch (err) {
-        this.log(`[${streamId}] ${attemptDesc}失败: ${err.message}`);
-
-        if (!isCFError(err) || i === attempts.length - 1) {
-          this.closeStream(streamId);
-          return false;
-        }
+        if (markOrSeen(parsed)) continue;
+        const r = await this.tryDial(
+          streamId,
+          parsed.host,
+          parsed.port,
+          `fallback[${i + 1}/${statics.length}]`,
+        );
+        if (r === "connected") return true;
+        if (r === "aborted") return false;
       }
     }
+
     // 所有尝试都失败，清理预注册的 stream
     this.closeStream(streamId);
     return false;
+  }
+
+  /**
+   * 单次拨号并绑定到流
+   * @returns {Promise<"connected" | "aborted" | "failed">} connected=成功停手，aborted=流已没（停手不再试），failed=可试下一个
+   */
+  async tryDial(streamId, attemptHost, attemptPort, attemptDesc) {
+    try {
+      this.log(`[${streamId}] 尝试${attemptDesc}: ${attemptHost}:${attemptPort}`);
+
+      const remoteSocket = connect({
+        hostname: attemptHost,
+        port: attemptPort,
+      });
+
+      // 添加超时控制
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(
+          () => reject(new Error("Connection timeout")),
+          this.config.connectTimeout,
+        );
+      });
+
+      // 等待连接建立或超时
+      await Promise.race([remoteSocket.opened, timeoutPromise]);
+
+      const remoteWriter = remoteSocket.writable.getWriter();
+      const remoteReader = remoteSocket.readable.getReader();
+
+      // 更新已预注册的 stream：绑定真实的 socket 并 flush 缓存数据
+      const stream = this.streams.get(streamId);
+      if (!stream || stream.isClosed) {
+        // 在 TCP 连接过程中流已被关闭
+        try { remoteWriter.releaseLock(); } catch {}
+        try { remoteSocket.close(); } catch {}
+        return "aborted";
+      }
+      stream.remoteSocket = remoteSocket;
+      stream.remoteWriter = remoteWriter;
+      stream.remoteReader = remoteReader;
+      stream.tcpConnected = true;
+
+      this.log(`[${streamId}] ${attemptDesc}成功`);
+
+      // Flush 缓存的早期数据到远程 socket
+      if (stream.pendingBuffer.length > 0) {
+        this.log(`[${streamId}] flush ${stream.pendingBuffer.length} 条缓存数据`);
+        for (const pending of stream.pendingBuffer) {
+          try {
+            await remoteWriter.write(pending);
+          } catch (e) {
+            this.log(`[${streamId}] flush 写入失败: ${e.message}`);
+            this.closeStream(streamId);
+            return "aborted";
+          }
+        }
+        stream.pendingBuffer = [];
+      }
+
+      this.sendConnected(streamId);
+
+      // 启动数据转发
+      this.pumpRemoteToWebSocket(streamId, remoteReader);
+
+      return "connected";
+    } catch (err) {
+      this.log(`[${streamId}] ${attemptDesc}失败: ${err.message}`);
+      return "failed";
+    }
   }
 
   /**
@@ -419,7 +617,7 @@ class StreamManager {
 
 // ==================== 主入口 ====================
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     try {
       const url = new URL(request.url);
 
@@ -435,35 +633,42 @@ export default {
           return new Response("Expected WebSocket", { status: 426 });
         }
 
-        // 2. 加载配置 (仅在确认 WS 连接后)
-        let kvConfig = null;
-        try {
-          if (env.GCM_KV) {
-            kvConfig = await env.GCM_KV.get("config", { type: "json" });
-            if (!kvConfig) {
-              ctx.waitUntil(
-                env.GCM_KV.put("config", JSON.stringify(DEFAULT_KV_CONFIG)),
-              );
-            }
-          }
-        } catch (err) {
-          console.error("Failed to load KV config:", err);
-        }
+        // 2. 加载配置（仅环境变量，无 KV 依赖）
+        const baseConfig = buildConfigFromEnv(env);
 
-        const baseConfig = kvConfig || DEFAULT_KV_CONFIG;
-
-        // 3. 解析 Fallback IPs
-        let fallbackIPs = DEFAULT_FALLBACK_IPS;
-        const queryFallback = url.searchParams.get("fallbackip");
-        if (queryFallback) {
-          fallbackIPs = [queryFallback];
-        } else if (env.FALLBACK_IPS) {
-          fallbackIPs = env.FALLBACK_IPS.split(",")
+        // 3. 解析 Fallback IPs（地址统一从环境变量读取，无硬编码）：
+        // ?fallbackip=（客户端传入，支持逗号分隔与重复参数，每项支持 host 或 host:port）
+        // env.FALLBACK_IPS（服务端静态，唯一来源）
+        // 尝试顺序由 StreamManager.createStream() 按 直连 > 客户端 > 动态 > 静态 执行
+        const splitList = (v) =>
+          String(v || "")
+            .split(",")
             .map((s) => s.trim())
             .filter(Boolean);
-        }
+        const dedupList = (arr) => {
+          const out = [];
+          const seen = new Set();
+          for (const h of arr) {
+            const key = h.toLowerCase();
+            if (!seen.has(key)) {
+              seen.add(key);
+              out.push(h);
+            }
+          }
+          return out;
+        };
+        const queryFallbackIPs = dedupList(
+          url.searchParams.getAll("fallbackip").flatMap(splitList),
+        );
+        const envFallbackIPs = splitList(env.FALLBACK_IPS);
+        // 静态 fallback 只从环境变量读取，不再合并硬编码默认值
+        const staticFallbackIPs = dedupList([...envFallbackIPs]);
 
-        const config = { ...baseConfig, cfFallbackIPs: fallbackIPs };
+        const config = {
+          ...baseConfig,
+          cfQueryFallbackIPs: queryFallbackIPs,
+          cfFallbackIPs: staticFallbackIPs,
+        };
 
         // 4. 建立连接
         const [client, server] = Object.values(new WebSocketPair());

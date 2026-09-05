@@ -7,10 +7,13 @@ workers_dev = true
 [vars]
 USER_ID = "v2up"
 FALLBACK_IPS = "proxyip.us.cmliussss.net,tw.william.us.ci"
-
-[[kv_namespaces]]
-binding = "GCM_KV"
-id = "63c8510262044b97bb8a8590adc176b9"
+DYNAMIC_NODES_URL = "https://proxy.ssdxzy.cc.cd/api/nodes?region=SG&limit=10&format=json"
+ENABLE_FALLBACK = "true"
+CONNECT_TIMEOUT = "1000"
+ENABLE_LOGGING = "false"
+MAX_STREAMS_PER_CONNECTION = "16"
+ENABLE_DYNAMIC_NODES = "true"
+DYNAMIC_NODES_TIMEOUT = "3000"
 
 [[routes]]
 pattern = "gcm.ics.de5.net"
