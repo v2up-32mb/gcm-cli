@@ -9,13 +9,15 @@ import (
 	"os/signal"
 	"syscall"
 
-	"gcm/config"
-	"gcm/dns"
-	"gcm/ech"
-	"gcm/logger"
-	"gcm/pool"
-	"gcm/relay"
-	"gcm/socks5"
+	gcmlib "github.com/v2up-32mb/gcm"
+	"github.com/v2up-32mb/gcm/pool"
+	"github.com/v2up-32mb/gcm/relay"
+	"github.com/v2up-32mb/xshared/dns"
+	"github.com/v2up-32mb/xshared/ech"
+	"github.com/v2up-32mb/xshared/logger"
+	"github.com/v2up-32mb/xshared/socks5"
+
+	"gcm/config" // 兼容 shim：配置核心在 xshared
 )
 
 // websocketLogger 过滤 websocket 库的冗余日志
@@ -148,7 +150,7 @@ func main() {
 
 	// 立即继续启动 SOCKS5 服务器，不等待预热
 	log.Info("正在启动 SOCKS5 服务器...")
-	socks5Server = socks5.NewServer(cfg, connPool, dnsCache)
+	socks5Server = socks5.NewServer(cfg, gcmlib.NewStreamDialer(connPool), socks5.WithDNSCache(dnsCache))
 	if err := socks5Server.Start(); err != nil {
 		log.Error("启动 SOCKS5 服务器失败: %v", err)
 		os.Exit(1)

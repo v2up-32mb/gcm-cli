@@ -294,7 +294,7 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 		cfg.DoHUrl = cmd.String("doh")
 	}
 	if cmd.IsSet("doh-timeout") {
-		cfg.DoHTimeout = yamlDuration{cmd.Duration("doh-timeout")}
+		cfg.DoHTimeout = NewDuration(cmd.Duration("doh-timeout"))
 	}
 	if cmd.IsSet("no-doh") && cmd.Bool("no-doh") {
 		cfg.EnableDoH = false
@@ -339,7 +339,7 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 
 	// ===== 隧道配置 =====
 	if cmd.IsSet("timeout") {
-		cfg.TunnelTimeout = yamlDuration{time.Duration(cmd.Int("timeout")) * time.Second}
+		cfg.TunnelTimeout = NewDuration(time.Duration(cmd.Int("timeout")) * time.Second)
 	}
 	if cmd.IsSet("no-mux") && cmd.Bool("no-mux") {
 		cfg.EnableMultiplex = false
@@ -347,25 +347,25 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 
 	// ===== 高级时间配置 =====
 	if cmd.IsSet("connection-ttl") {
-		cfg.ConnectionTTL = yamlDuration{cmd.Duration("connection-ttl")}
+		cfg.ConnectionTTL = NewDuration(cmd.Duration("connection-ttl"))
 	}
 	if cmd.IsSet("connection-timeout") {
-		cfg.ConnectionTimeout = yamlDuration{cmd.Duration("connection-timeout")}
+		cfg.ConnectionTimeout = NewDuration(cmd.Duration("connection-timeout"))
 	}
 	if cmd.IsSet("heartbeat-interval") {
-		cfg.HeartbeatInterval = yamlDuration{cmd.Duration("heartbeat-interval")}
+		cfg.HeartbeatInterval = NewDuration(cmd.Duration("heartbeat-interval"))
 	}
 	if cmd.IsSet("heartbeat-timeout") {
-		cfg.HeartbeatTimeout = yamlDuration{cmd.Duration("heartbeat-timeout")}
+		cfg.HeartbeatTimeout = NewDuration(cmd.Duration("heartbeat-timeout"))
 	}
 	if cmd.IsSet("dns-cache-ttl") {
-		cfg.DNSCacheTTL = yamlDuration{cmd.Duration("dns-cache-ttl")}
+		cfg.DNSCacheTTL = NewDuration(cmd.Duration("dns-cache-ttl"))
 	}
 	if cmd.IsSet("relay-monitor-interval") {
-		cfg.RelayMonitorInterval = yamlDuration{cmd.Duration("relay-monitor-interval")}
+		cfg.RelayMonitorInterval = NewDuration(cmd.Duration("relay-monitor-interval"))
 	}
 	if cmd.IsSet("relay-max-latency") {
-		cfg.RelayMaxLatency = yamlDuration{cmd.Duration("relay-max-latency")}
+		cfg.RelayMaxLatency = NewDuration(cmd.Duration("relay-max-latency"))
 	}
 
 	// ===== 窗口流控配置 =====
@@ -374,29 +374,29 @@ func ApplyFlags(cfg *Config, ctx context.Context, cmd *cli.Command) error {
 		if err != nil {
 			return fmt.Errorf("无效的默认窗口大小: %w", err)
 		}
-		cfg.DefaultWindowSize = yamlByteSize{bytes}
+		cfg.DefaultWindowSize = NewByteSize(bytes)
 	}
 	if cmd.IsSet("min-window-size") {
 		bytes, err := parseByteSize(cmd.String("min-window-size"))
 		if err != nil {
 			return fmt.Errorf("无效的最小窗口大小: %w", err)
 		}
-		cfg.MinWindowSize = yamlByteSize{bytes}
+		cfg.MinWindowSize = NewByteSize(bytes)
 	}
 	if cmd.IsSet("max-window-size") {
 		bytes, err := parseByteSize(cmd.String("max-window-size"))
 		if err != nil {
 			return fmt.Errorf("无效的最大窗口大小: %w", err)
 		}
-		cfg.MaxWindowSize = yamlByteSize{bytes}
+		cfg.MaxWindowSize = NewByteSize(bytes)
 	}
 	if cmd.IsSet("window-timeout") {
-		cfg.WindowTimeout = yamlDuration{cmd.Duration("window-timeout")}
+		cfg.WindowTimeout = NewDuration(cmd.Duration("window-timeout"))
 	}
 
 	// ===== 拥塞控制配置 =====
 	if cmd.IsSet("congestion-control-interval") {
-		cfg.CongestionControlInterval = yamlDuration{cmd.Duration("congestion-control-interval")}
+		cfg.CongestionControlInterval = NewDuration(cmd.Duration("congestion-control-interval"))
 	}
 
 	// ===== ECH 配置 =====
