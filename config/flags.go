@@ -95,6 +95,38 @@ func DefineFlags() []cli.Flag {
 			OnlyOnce: true,
 		},
 
+		// ===== 路由绕过 / HTTP 监听（对齐 x-client gcm backend 的 bypass 参数面） =====
+		&cli.BoolFlag{
+			Name:        "bypass-private",
+			Usage:       "绕过私有/局域网地址（直连不走隧道）",
+			Category:    "路由绕过",
+			Destination: &Overrides.BypassPrivate,
+		},
+		&cli.BoolFlag{
+			Name:        "bypass-geoip-cn",
+			Usage:       "绕过中国大陆 IP（内置 GeoIP 规则，直连）",
+			Category:    "路由绕过",
+			Destination: &Overrides.BypassGeoIPCN,
+		},
+		&cli.BoolFlag{
+			Name:        "bypass-geosite-cn",
+			Usage:       "绕过中国大陆域名（内置 GeoSite 规则，直连）",
+			Category:    "路由绕过",
+			Destination: &Overrides.BypassGeoSiteCN,
+		},
+		&cli.StringFlag{
+			Name:        "bypass-rules",
+			Usage:       "自定义绕过规则（多行，支持 domain:/full:/IP/CIDR，如 \"domain:example.cn\")",
+			Category:    "路由绕过",
+			Destination: &Overrides.BypassRules,
+		},
+		&cli.StringFlag{
+			Name:        "http",
+			Usage:       "可选：额外启用 HTTP 代理监听（如 127.0.0.1:8118；默认不启用）",
+			Category:    "路由绕过",
+			Destination: &Overrides.HTTPListen,
+		},
+
 		// ===== 中转节点配置 =====
 		&cli.StringSliceFlag{
 			Name:     "relay",

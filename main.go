@@ -7,14 +7,19 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+
+	xsharedconfig "github.com/v2up-32mb/xshared/config"
 
 	gcmlib "github.com/v2up-32mb/gcm"
 	"github.com/v2up-32mb/gcm/pool"
 	"github.com/v2up-32mb/gcm/relay"
 	"github.com/v2up-32mb/xshared/dns"
 	"github.com/v2up-32mb/xshared/ech"
+	"github.com/v2up-32mb/xshared/httpproxy"
 	"github.com/v2up-32mb/xshared/logger"
+	"github.com/v2up-32mb/xshared/routing"
 	"github.com/v2up-32mb/xshared/socks5"
 
 	"gcm/config" // 兼容 shim：配置核心在 xshared
@@ -41,7 +46,16 @@ var (
 	echManager   *ech.EchManager
 	connPool     *pool.ConnectionPool
 	socks5Server *socks5.Server
+	httpServer   *httpproxy.Server
 )
+
+// b2i bool→int（bypass 规则行数统计用）
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 func main() {
 	// 配置 websocket 库的日志过滤器（抑制无害的 "already closed" 警告）
@@ -154,14 +168,47 @@ func main() {
 	}
 
 	// 立即继续启动 SOCKS5 服务器，不等待预热
+	// 路由绕过：与 x-client gcm backend 相同的参数面（private/geoip-cn/geosite-cn/手动规则）
+	var bypassMatcher *routing.Matcher
+	if config.Overrides.BypassPrivate || config.Overrides.BypassGeoIPCN || config.Overrides.BypassGeoSiteCN || strings.TrimSpace(config.Overrides.BypassRules) != "" {
+		m, err := routing.NewMatcher(config.Overrides.BypassPrivate, config.Overrides.BypassGeoIPCN, config.Overrides.BypassGeoSiteCN, config.Overrides.BypassRules)
+		if err != nil {
+			log.Error("绕过规则无效: %v", err)
+			os.Exit(1)
+		}
+		bypassMatcher = m
+		log.Info("路由绕过: private=%v geoip-cn=%v geosite-cn=%v 手动规则=%d 行",
+			config.Overrides.BypassPrivate, config.Overrides.BypassGeoIPCN, config.Overrides.BypassGeoSiteCN,
+			strings.Count(config.Overrides.BypassRules, "\n")+b2i(config.Overrides.BypassRules != ""))
+	}
+
 	log.Info("正在启动 SOCKS5 服务器...")
-	socks5Server = socks5.NewServer(cfg, gcmlib.NewStreamDialer(connPool), socks5.WithDNSCache(dnsCache))
+	socks5Opts := []socks5.Option{socks5.WithDNSCache(dnsCache)}
+	if bypassMatcher != nil {
+		socks5Opts = append(socks5Opts, socks5.WithBypassMatcher(bypassMatcher))
+	}
+	socks5Server = socks5.NewServer(cfg, gcmlib.NewStreamDialer(connPool), socks5Opts...)
 	if err := socks5Server.Start(); err != nil {
 		log.Error("启动 SOCKS5 服务器失败: %v", err)
 		os.Exit(1)
 	}
 	defer socks5Server.Close()
 	log.Debug("SOCKS5 服务器启动完成")
+
+	// 可选 HTTP 代理监听（同一数据面与 bypass 策略）
+	if listen := strings.TrimSpace(config.Overrides.HTTPListen); listen != "" {
+		httpOpts := []httpproxy.Option{}
+		if bypassMatcher != nil {
+			httpOpts = append(httpOpts, httpproxy.WithBypassMatcher(bypassMatcher))
+		}
+		httpServer = httpproxy.NewServer(&xsharedconfig.Config{ListenAddress: listen}, gcmlib.NewStreamDialer(connPool), httpOpts...)
+		if err := httpServer.Start(); err != nil {
+			log.Error("启动 HTTP 代理服务器失败: %v", err)
+			os.Exit(1)
+		}
+		defer httpServer.Close()
+		log.Info("HTTP 代理监听: %s", listen)
+	}
 
 	// 启动 ECH 定时刷新任务（如果启用）
 	if cfg.EnableECH && echManager != nil {

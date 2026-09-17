@@ -29,6 +29,21 @@ var (
 	NewByteSize   = xshared.NewByteSize
 )
 
+// ProxyOverrides bypass 分流与 HTTP 监听的 CLI 侧配置。
+// 不进入 xshared Config（bypass 由 SOCKS5/HTTP 服务器 Option 注入；
+// xshared Config 无对应字段且 Config 为类型别名不可扩展）。
+// flags.go 经 urfave/cli Destination 直接绑定到此变量。
+type ProxyOverrides struct {
+	BypassPrivate   bool
+	BypassGeoIPCN   bool
+	BypassGeoSiteCN bool
+	BypassRules     string
+	HTTPListen      string // 可选 HTTP 代理监听地址（空 = 不启用）
+}
+
+// Overrides 全局覆盖项（flags 定义时经 Destination 绑定，Action 阶段即已就绪）
+var Overrides ProxyOverrides
+
 // parseByteSize 解析人类可读的字节大小（"1MB" / "512KB" / "1073741824"）。
 // 原 config.go 的包内助手，随核心迁移后保留在 CLI 侧。
 func parseByteSize(s string) (int64, error) {
