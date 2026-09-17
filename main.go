@@ -55,6 +55,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --help/--version 等路径不执行 Action，cfg 为 nil：帮助文本已输出，直接退出
+	if cfg == nil {
+		os.Exit(0)
+	}
+
 	// 初始化日志
 	logger.InitGlobalLogger(cfg)
 	defer logger.Close() // 确保在所有资源关闭后才关闭日志
