@@ -171,15 +171,17 @@ func main() {
 	// 路由绕过：与 x-client gcm backend 相同的参数面（private/geoip-cn/geosite-cn/手动规则）
 	var bypassMatcher *routing.Matcher
 	if config.Overrides.BypassPrivate || config.Overrides.BypassGeoIPCN || config.Overrides.BypassGeoSiteCN || strings.TrimSpace(config.Overrides.BypassRules) != "" {
-		m, err := routing.NewMatcher(config.Overrides.BypassPrivate, config.Overrides.BypassGeoIPCN, config.Overrides.BypassGeoSiteCN, config.Overrides.BypassRules)
+		geoIPPath, geoSitePath, giFound, gsFound := config.ResolveGeoPaths()
+		m, err := routing.NewMatcherWithGeoFile(config.Overrides.BypassPrivate, config.Overrides.BypassGeoIPCN, config.Overrides.BypassGeoSiteCN, config.Overrides.BypassRules, geoIPPath, geoSitePath)
 		if err != nil {
 			log.Error("绕过规则无效: %v", err)
 			os.Exit(1)
 		}
 		bypassMatcher = m
-		log.Info("路由绕过: private=%v geoip-cn=%v geosite-cn=%v 手动规则=%d 行",
+		log.Info("路由绕过: private=%v geoip-cn=%v geosite-cn=%v 手动规则=%d 行 | 数据文件: geoip.dat=%v geosite.dat=%v",
 			config.Overrides.BypassPrivate, config.Overrides.BypassGeoIPCN, config.Overrides.BypassGeoSiteCN,
-			strings.Count(config.Overrides.BypassRules, "\n")+b2i(config.Overrides.BypassRules != ""))
+			strings.Count(config.Overrides.BypassRules, "\n")+b2i(config.Overrides.BypassRules != ""),
+			giFound, gsFound)
 	}
 
 	log.Info("正在启动 SOCKS5 服务器...")

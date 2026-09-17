@@ -40,6 +40,12 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/generate_204
   --bypass-geosite-cn    绕过中国大陆域名
   --bypass-rules         自定义规则（domain:/full:/IP/CIDR）
   --http <addr>          额外启用 HTTP 代理监听（同一数据面与 bypass 策略）
+  --geo-ip / --geo-site  v2ray 格式 geoip.dat/geosite.dat 路径（覆盖内置 CN 数据）
+
+数据文件：内置 CN 规则快照已随程序打包；如需跟随最新路由数据，将 v2ray 生态的
+`geoip.dat` / `geosite.dat`（推荐 [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat/releases)）
+放在程序同目录（或用 --geo-ip/--geo-site 指定路径），启动时自动加载并覆盖内置数据，
+日志会标注是否加载成功。release 附件已预置一份构建时快照可直接下载使用。
 ```
 
 完整参数见 `gcm -h`；YAML/JSON 配置文件用 `--config`（CLI 参数优先）。

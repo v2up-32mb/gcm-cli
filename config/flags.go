@@ -126,6 +126,18 @@ func DefineFlags() []cli.Flag {
 			Category:    "路由绕过",
 			Destination: &Overrides.HTTPListen,
 		},
+		&cli.StringFlag{
+			Name:        "geo-ip",
+			Usage:       "geoip.dat 路径（v2ray 格式，覆盖内置 CN 段；留空探测程序同目录）",
+			Category:    "路由绕过",
+			Destination: &Overrides.GeoIPPath,
+		},
+		&cli.StringFlag{
+			Name:        "geo-site",
+			Usage:       "geosite.dat 路径（v2ray 格式，覆盖内置 CN 域名；留空探测程序同目录）",
+			Category:    "路由绕过",
+			Destination: &Overrides.GeoSitePath,
+		},
 
 		// ===== 中转节点配置 =====
 		&cli.StringSliceFlag{
