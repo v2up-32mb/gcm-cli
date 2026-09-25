@@ -60,3 +60,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/generate_204
 ```bash
 go build -o gcm .
 ```
+
+## 版本与发版
+
+- 逐版本变更与升级指引见 `CHANGELOG.md`;协作约束（含**发版铁律：不得未经人工批准自行打 tag 并推送**）见 `AGENTS.md`。
