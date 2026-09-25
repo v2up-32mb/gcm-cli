@@ -52,8 +52,9 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/generate_204
 
 ## 协议与服务端
 
-协议格式、Worker 服务端部署（`worker.js`）见 [`gcm`](https://github.com/v2up-32mb/gcm) 库仓
-`README` 与 `worker/DEPLOY.md`。
+协议格式见 [`gcm`](https://github.com/v2up-32mb/gcm) 库仓 `README` 与 `protocol/`；
+Worker 服务端（`worker.js` + 部署说明）已独立建仓
+[`gcm-worker`](https://github.com/v2up-32mb/gcm-worker)。
 
 ## 构建
 
