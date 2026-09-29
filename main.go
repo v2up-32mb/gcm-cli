@@ -149,10 +149,10 @@ func printStartupInfo(log *logger.Logger) {
 		log.Info("出口代理IP: %s", cfg.ProxyIP)
 	}
 	if cfg.ProxyAll {
-		log.Info("强制走回退出口: 已启用（跳过直连；需 Worker 支持 ?proxy-all=）")
+		log.Info("强制走 socks5 出口: 已启用（需 Worker 支持 ?proxy-all= 且出口为 socks5 配置）")
 		if cfg.ProxyIP == "" {
-			log.Warn("--proxy-all 已开但未指定 --proxy-ip，将完全依赖 Worker 侧自带的出口池" +
-				"（动态节点/静态 FALLBACK_IPS）；若 Worker 未配任何出口，所有流会被直接关断")
+			log.Warn("--proxy-all 已开但未指定 --proxy-ip，将完全依赖 Worker 侧 socks5 出口池" +
+				"（SOCKS5_PROXY）；若 Worker 未配任何 socks5 出口，所有流会被直接关断")
 		}
 	}
 	if cfg.UserID != "" {
