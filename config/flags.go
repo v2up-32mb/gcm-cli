@@ -48,14 +48,14 @@ func DefineFlags() []cli.Flag {
 		&cli.StringFlag{
 			Name:     "proxy-ip",
 			Aliases:  []string{"p"},
-			Usage:    "出口端代理IP (留空时 Worker 使用自身已配置的 proxyIP)",
+			Usage:    "出口端代理IP (非 proxy-all: L4 覆盖偏好, 留空用 Worker 自身出口; proxy-all: 必须是 socks5 配置 [socks5h?://][user:pass@]host[:port])",
 			Category: "基本",
 			OnlyOnce: true,
 		},
 		&cli.BoolFlag{
 			Name: "proxy-all",
-			Usage: "强制所有流量走回退出口: 跳过 Worker 的直连, 直接从 --proxy-ip/Worker 出口池起步 " +
-				"(需同时配出口; 无出口可用时 Worker 直接关流, 不回落直连)",
+			Usage: "强制所有流量走 socks5 出口: Worker 跳过直连与 L4 回退链, 直接向 --proxy-ip/Worker 侧 " +
+				"socks5 代理建流 (需 gcm-worker v0.1.3+; 无 socks5 出口可用时流被直接关断, 不回落直连)",
 			Category: "基本",
 			OnlyOnce: true,
 		},

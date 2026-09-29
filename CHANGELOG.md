@@ -4,6 +4,21 @@
 
 ---
 
+## 未发版（待批准打 tag；帮助/文档文本同步 gcm-worker 语义演进）
+
+**Docs（无功能代码变更）**
+
+- `--proxy-ip` / `--proxy-all` 帮助文本、`config.yaml` 注释、README 参数表同步 gcm-worker
+  v0.1.3 的**新语义**：`--proxy-all` 打开时连接 URL 带 `proxy-all=true`，Worker **只用 socks5
+  出口**（跳过直连与 L4 回退链）——此时 `--proxy-ip`/`?fallbackip=` 必须是 socks5 服务器配置
+  `[socks5h?://][user:pass@]host[:port]`，不是 L4 覆盖项。
+- 启动日志：`强制走 socks5 出口: 已启用`；未配 `--proxy-ip` 时 Warn 改为提示依赖 Worker 侧
+  `SOCKS5_PROXY`。
+- **破坏性提示**：v1.1.0 若开了 `--proxy-all` 且 `--proxy-ip` 是 L4 覆盖项，搭配 gcm-worker
+  v0.1.3+ 会失败——请改配真实 socks5 代理（不开 proxy-all 的部署不受影响）。
+
+---
+
 ## v1.1.0 — 2026-09-29
 
 **Build**
