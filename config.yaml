@@ -18,6 +18,9 @@ relayIPs:
   - "cf.0sm.com"
 # 出口端代理IP（传递给 Worker，留空时 Worker 使用自身已配置的 proxyIP）
 proxyIP: ""
+# 强制所有流量走回退出口：连接 URL 带 proxy-all=true，Worker 跳过直连直接从 proxyIP 起步。
+# 需同时配 proxyIP（或 Worker 侧配了动态节点/静态 FALLBACK_IPS），否则所有流会被直接关断。
+proxyAll: false
 # 是否启用 DNS over HTTPS
 enableDoH: true
 # DoH 服务地址

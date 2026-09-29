@@ -22,6 +22,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://www.google.com/generate_204
   --worker, -w        Worker 地址（必须）
   --user-id, -u       用户鉴权 ID
   --proxy-ip, -p      出口端代理 IP（留空用 Worker 自身配置）
+  --proxy-all         强制所有流量走回退出口（跳过 Worker 直连，需配 --proxy-ip 或 Worker 侧出口池）
   --listen, -l        SOCKS5 监听地址（默认 :1080）
 
 连接池

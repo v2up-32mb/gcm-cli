@@ -235,6 +235,13 @@ func printStartupInfo(log *logger.Logger) {
 	if cfg.ProxyIP != "" {
 		log.Info("出口代理IP: %s", cfg.ProxyIP)
 	}
+	if cfg.ProxyAll {
+		log.Info("强制走回退出口: 已启用（跳过直连；需 Worker 支持 ?proxy-all=）")
+		if cfg.ProxyIP == "" {
+			log.Warn("--proxy-all 已开但未指定 --proxy-ip，将完全依赖 Worker 侧自带的出口池" +
+				"（动态节点/静态 FALLBACK_IPS）；若 Worker 未配任何出口，所有流会被直接关断")
+		}
+	}
 	if cfg.EnableECH {
 		log.Info("ECH: 已启用 (%s)", cfg.ECHDomain)
 	}

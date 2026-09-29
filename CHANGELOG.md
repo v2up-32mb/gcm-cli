@@ -4,15 +4,46 @@
 
 ---
 
-## 未发版（main HEAD，待人工批准打 tag）
+## v1.1.0 — 2026-09-29
 
-**Build / Docs**
+**Build**
 
-- 依赖升级：`github.com/v2up-32mb/xshared` 从 pseudo-version
-  （`v0.1.1-0.2026...99d0b0a4cf0d`，指向非正式 commit）收敛为**正式 tag v0.1.1**。
-- 新增 `AGENTS.md`（壳约束 + 发版铁律）与 `CHANGELOG.md` 三件套。
+- 依赖升级：`github.com/v2up-32mb/gcm v0.1.0 → v0.1.2`（`?proxy-all=true` 出口开关 +
+  修两处出口参数丢失；Go API 无变更，patch）、`xshared v0.1.1 → v0.1.2`（`Config.ProxyAll`）。
 
-**升级指引**：无代码改动；依赖 pin 规范后随下次发版生效。
+**Added**
+
+- **`--proxy-all` 开关**：强制所有流量走回退出口——连接 URL 带 `proxy-all=true`，
+  Worker **跳过「直连」一级**，直接从 `--proxy-ip` / Worker 出口池起步。
+  也可写进 `config.yaml` 的 `proxyAll: true`。默认 `false` = 旧行为，**非破坏性**。
+  - 启动时会显式打印「强制走回退出口: 已启用」；若同时**没给** `--proxy-ip`，
+    会额外 Warn 提醒完全依赖 Worker 侧出口池，若 Worker 未配任何出口则**所有流会被直接关断**
+    （这是「强制」的应有语义：不回落直连）。
+  - 目标 Worker 须用支持 `?proxy-all=` 的 gcm-worker 版本；旧版 Worker 静默忽略该 query，
+    退化为「仍先直连」。
+- **新增首个单测** `config/flags_test.go`：锁住 `--proxy-ip` / `--proxy-all` 到 `Config` 的映射
+  （出口参数名写错会静默退化成「仍先直连」，必须有回归网）。
+
+**Fixed / Docs**
+
+- 补记：`--proxy-ip` 的值现由 `gcm` 侧做 URL 转义（gcm v0.1.2）。含 `[ipv6]` 方括号、
+  空格、`#`、`&` 的出口地址之前会在 query 里被截断成半个，现在能正确送达 Worker。
+- `config.yaml` 示例补 `proxyAll`；README 常用参数表补 `--proxy-all`。
+
+**Changelog 归档修正（不影响代码）**
+
+- `v1.0.1` tag 实际已包含两笔变更，但当时仍误留在「未发版」区，本次一并归档：
+  路由数据文件支持（`--geo-ip` / `--geo-site`）与 `xshared` 从 pseudo-version 收敛为
+  正式 tag v0.1.1。按发版纪律不重打旧 tag，故在此说明。
+
+**升级指引**
+
+- **无需改动配置文件**，行为默认与 v1.0.x 完全一致（`proxyAll` 缺省 `false`）。
+- 想用新功能：命令行 `--proxy-all` 或 `config.yaml` 加 `proxyAll: true`。
+  注意**必须同时有出口**（`--proxy-ip`，或 Worker 侧配了动态节点 / 静态 `FALLBACK_IPS`），
+  否则所有流会被 Worker 直接关断——「强制」不回落直连。
+- `--proxy-ip` 的值现已做 URL 转义：含 `[ipv6]` 方括号、空格、`#`、`&` 的出口地址
+  之前会被 query 截断成半个，现在能正确送达 Worker。
 
 ---
 
