@@ -751,7 +751,10 @@ func (p *ConnectionPool) createConnectionWithRelay(relay *relay.RelayNode, reaso
 	atomic.AddInt64(&p.stats.CreatedConnections, 1)
 
 	// 使用指定的中转节点
-	url := fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+	// 出口参数（?fallbackip= / ?proxy-all=）必须走 buildWSSURL：
+	// 本函数原先内联拼 wss://host/uid，漏掉出口参数——节点切换预热的连接
+	// （quality_monitor.go）会静默丢失 --proxy-ip / --proxy-all。
+	url := p.buildWSSURL()
 	customDial := func(network, addr string) (net.Conn, error) {
 		return net.DialTimeout(network, net.JoinHostPort(relay.IP, fmt.Sprintf("%d", relay.Port)), p.cfg.GetConnectionTimeout())
 	}
