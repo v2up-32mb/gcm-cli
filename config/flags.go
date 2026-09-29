@@ -43,6 +43,11 @@ func DefineFlags() []cli.Flag {
 			Usage:    "出口端代理IP (留空时 Worker 使用自身已配置的 proxyIP)",
 			Category: "基本",
 		},
+		&cli.BoolFlag{
+			Name:     "proxy-all",
+			Usage:    "强制所有流量走回退出口: 跳过 Worker 的直连, 直接从 --proxy-ip/Worker 出口池起步 (需同时配出口; 无出口可用时 Worker 直接关流, 不回落直连)",
+			Category: "基本",
+		},
 		&cli.StringFlag{
 			Name:     "log-level",
 			Usage:    "日志级别: DEBUG/INFO/WARN/ERROR",
@@ -232,6 +237,9 @@ func ApplyFlags(cfg *Config, ctx *cli.Context) error {
 	}
 	if ctx.IsSet("proxy-ip") {
 		cfg.ProxyIP = ctx.String("proxy-ip")
+	}
+	if ctx.IsSet("proxy-all") {
+		cfg.ProxyAll = ctx.Bool("proxy-all")
 	}
 	if ctx.IsSet("log-level") {
 		cfg.LogLevel = ParseLogLevel(ctx.String("log-level"))

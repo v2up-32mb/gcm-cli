@@ -225,6 +225,11 @@ type Config struct {
 
 	// 出口端代理配置
 	ProxyIP string `yaml:"proxyIP,omitempty" json:"proxyIP,omitempty"` // 出口端代理IP，传递给 Worker，留空时 Worker 使用自身已配置的 proxyIP
+	// ProxyAll 强制所有流量走回退出口：为 true 时连接 URL 携带 `proxy-all=true`，
+	// Worker 跳过「直连」一级，直接从 ?fallbackip= 起步。默认 false = 旧行为。
+	// 目标 Worker 须支持该 query（本分支自带 worker.js 已支持）；旧版 Worker 会忽略
+	// 该参数，退化为「仍先直连」，不断流不报错。
+	ProxyAll bool `yaml:"proxyAll,omitempty" json:"proxyAll,omitempty"`
 
 	// DoH 超时配置
 	DoHTimeout yamlDuration `yaml:"dohTimeout,omitempty" json:"dohTimeout,omitempty"`

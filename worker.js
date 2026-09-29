@@ -14,6 +14,10 @@
  *
  * 出口顺序: 直连原始 host > 客户端 ?fallbackip= > 动态节点 API（env.DYNAMIC_NODES_URL）> 静态 fallback（env.FALLBACK_IPS，
  *   每项支持 host 或 host:port；无硬编码默认值）
+ *   ?proxy-all=true 则砍掉第 1 级（直连），从第 2 级起步——用于「强制所有流量走指定出口」。
+ *   出口条目里的显式端口是 **L4 覆盖**语义：目标端口被该端口替换，节点靠报文（SNI/Host/端口表）
+ *   自行路由到真实目标——**不是 SOCKS/HTTP 代理，Worker 不做任何握手**。
+ *   ?proxy-all= 是连接级开关（对该 WebSocket 连接上所有流生效），缺省 false。
  *
  * 部署说明:
  * 1. 登录 Cloudflare Dashboard
@@ -36,6 +40,7 @@ const DEFAULT_CONFIG = {
   connectTimeout: 1000,
   enableLogging: false,
   maxStreamsPerConnection: 16,
+  proxyAll: false, // ?proxy-all= 默认关（query 参数，非环境变量）
   enableDynamicNodes: true,
   dynamicNodesUrl: "",
   dynamicNodesTimeout: 3000, // 拉取动态列表超时 3s，失败直接降级
@@ -307,14 +312,18 @@ class StreamManager {
     this.streamCount++;
 
     let { host, port } = parseAddress(targetAddr);
+    const proxyAll = this.config.proxyAll === true;
     // 出口顺序：直连 > 客户端传入 fallback > 动态节点 > 静态 fallback
-    // 1. 直连优先
-    {
+    // 1. 直连优先（?proxy-all=true 时整段跳过）
+    if (proxyAll) {
+      this.log(`[${streamId}] ?proxy-all=true：跳过直连，直接从回退链起步`);
+    } else {
       const r = await this.tryDial(streamId, host, port, "直连");
       if (r === "connected") return true;
       if (r === "aborted") return false;
     }
 
+    let attempted = 0;
     if (this.config.enableFallback) {
       // 去重集合：前面已试过的，后面不再重复试
       const seenHosts = new Set();
@@ -340,6 +349,7 @@ class StreamManager {
           parsed.port,
           `query-fallback[${i + 1}/${queries.length}]`,
         );
+        attempted++;
         if (r === "connected") return true;
         if (r === "aborted") return false;
       }
@@ -352,6 +362,7 @@ class StreamManager {
         if (!parsed) continue;
         if (markOrSeen(parsed)) continue;
         dynIndex++;
+        attempted++;
         const r = await this.tryDial(
           streamId,
           parsed.host,
@@ -377,9 +388,16 @@ class StreamManager {
           parsed.port,
           `fallback[${i + 1}/${statics.length}]`,
         );
+        attempted++;
         if (r === "connected") return true;
         if (r === "aborted") return false;
       }
+    }
+
+    // proxy-all 却一条出口都没试到：补一句人话日志，否则客户端只看到流默默死掉无法定位
+    // （ENABLE_FALLBACK=false，或 ?fallbackip=/动态节点/FALLBACK_IPS 全空）
+    if (proxyAll && attempted === 0) {
+      logError("Mux", "?proxy-all=true 但无任何可用回退出口（?fallbackip= / 动态节点 / FALLBACK_IPS 均为空，或 ENABLE_FALLBACK=false）");
     }
 
     // 所有尝试都失败，清理预注册的 stream
@@ -663,9 +681,16 @@ export default {
         const envFallbackIPs = splitList(env.FALLBACK_IPS);
         // 静态 fallback 只从环境变量读取，不再合并硬编码默认值
         const staticFallbackIPs = dedupList([...envFallbackIPs]);
+        // ?proxy-all= 连接级开关：true 时本连接所有流跳过直连，直接走回退链
+        // （沿用 parseEnvBool 的真值集合；缺省 false。客户端可控，与 ?fallbackip= 同信任级）
+        const proxyAll = parseEnvBool(
+          url.searchParams.get("proxy-all"),
+          DEFAULT_CONFIG.proxyAll,
+        );
 
         const config = {
           ...baseConfig,
+          proxyAll,
           cfQueryFallbackIPs: queryFallbackIPs,
           cfFallbackIPs: staticFallbackIPs,
         };

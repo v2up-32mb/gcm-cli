@@ -338,11 +338,19 @@ func (p *ConnectionPool) Warmup() error {
 	return nil
 }
 
-// buildWSSURL 构建 WebSocket 连接 URL（包含 proxyIP 参数）
+// buildWSSURL 构建 WebSocket 连接 URL（包含出口偏好 query 参数）
+// 出口参数（?fallbackip= / ?proxy-all=）是 Worker 的对外契约，只认这两个名字；
+// Worker 侧对未知 query 参数宽容，带过去不会报错。
 func (p *ConnectionPool) buildWSSURL() string {
 	url := fmt.Sprintf("wss://%s/%s", p.cfg.WorkerHost, p.cfg.UserID)
+	sep := "?"
 	if p.cfg.ProxyIP != "" {
-		url += "?fallbackip=" + p.cfg.ProxyIP
+		url += sep + "fallbackip=" + p.cfg.ProxyIP
+		sep = "&"
+	}
+	// 强制走回退出口：Worker 跳过直连，直接从 ?fallbackip= 起步
+	if p.cfg.ProxyAll {
+		url += sep + "proxy-all=true"
 	}
 	return url
 }
